@@ -8,9 +8,9 @@ Always read this file before making changes.
 ## Project Overview
 
 **NetImage** is a Windows desktop application (WPF) written in **C# / .NET 10** that allows users to
-open FAT-formatted floppy/hard-disk image files (`.ima`, `.img`) and browse their contents in a
-tree view. The application is in an early stage: the FAT filesystem parser is functional but the
-tree-building and file-extraction features are still being developed.
+open FAT-formatted floppy/hard-disk image files (`.ima`, `.img`) and browse/modify their contents.
+The application supports viewing files in a tree/list view, adding files and folders, creating
+folders, deleting entries, extracting files, and saving modified images.
 
 ---
 
@@ -24,6 +24,7 @@ tree-building and file-extraction features are still being developed.
 | Architecture | MVVM (Model-View-ViewModel) |
 | Build system | MSBuild via `NetImage.csproj` / `NetImage.slnx` |
 | Output type | Windows executable (`WinExe`) |
+| Testing | NUnit 4.3.2 with NUnit3TestAdapter |
 
 ---
 
@@ -31,26 +32,35 @@ tree-building and file-extraction features are still being developed.
 
 ```
 NetImage/
-├── App.xaml / App.xaml.cs       # WPF application entry point
-├── AssemblyInfo.cs               # Assembly metadata
-├── NetImage.csproj               # Single-project SDK-style project file
-├── NetImage.slnx                 # Solution file
+├── App.xaml / App.xaml.cs           # WPF application entry point
+├── AssemblyInfo.cs                   # Assembly metadata (themes)
+├── NetImage.csproj                   # Main project file (excludes Tests)
+├── NetImage.slnx                     # Solution file
+├── diskette.png                      # Application icon
 │
 ├── Models/
-│   └── TreeItem.cs               # INotifyPropertyChanged tree node model
+│   └── TreeItem.cs                   # INotifyPropertyChanged tree node model
 │
 ├── ViewModels/
-│   └── MainViewModel.cs          # Main window view model; orchestrates commands & state
+│   ├── MainViewModel.cs              # Main window view model; orchestrates commands & state
+│   └── CreateFolderRequestEventArgs.cs # EventArgs for folder creation dialog
 │
 ├── Views/
-│   ├── MainView.xaml             # Main window XAML (menu, tree view, status bar)
-│   └── MainView.xaml.cs         # Code-behind (minimal — only wires DataContext)
+│   ├── MainView.xaml / MainView.xaml.cs      # Main window (toolbar, tree, list, status bar)
+│   └── FolderNameDialog.xaml / .cs           # Dialog for creating new folders
 │
 ├── Utils/
-│   └── ActionCommand.cs          # ICommand implementation backed by an Action<object?>
+│   └── ActionCommand.cs              # ICommand implementation backed by Action<object?>
 │
-└── Workers/
-    └── DiskImageWorker.cs        # Reads & parses FAT disk image files
+├── Workers/
+│   └── DiskImageWorker.cs            # FAT filesystem parser and modifier
+│
+└── NetImage.Tests/
+    ├── NetImage.Tests.csproj         # Test project (references main project)
+    ├── Workers/
+    │   └── DiskImageWorkerTests.cs   # NUnit tests for DiskImageWorker
+    └── data/
+        └── test.ima                  # Test disk image file
 ```
 
 ---
@@ -58,34 +68,71 @@ NetImage/
 ## Key Classes
 
 ### `Models/TreeItem.cs`
-- A self-referential tree node used as items in the WPF `TreeView`.
-- Properties: `Name` (read-only `string`), `Children` (`ObservableCollection<TreeItem>`), `IsExpanded` (notifying `bool`).
+- A self-referential tree node used as items in the WPF `TreeView` and `ListView`.
+- Properties:
+  - `Name` (read-only `string`) — display name
+  - `Path` (read-only `string`) — full backslash-separated path inside image (empty = root)
+  - `Size` (read-only `long?`) — file size; `null` indicates a folder
+  - `Modified` (read-only `DateTime?`) — last modified timestamp
+  - `FormattedSize` — human-readable size string (e.g., "1.5 KB")
+  - `FormattedModified` — formatted date string (e.g., "2024-01-15 14:30")
+  - `IsFolder` — computed property (`Size == null`)
+  - `IconGlyph` — Segoe Fluent Icons glyph for folder/file
+  - `Children` (`ObservableCollection<TreeItem>`) — for hierarchical tree view
+  - `Items` (`ObservableCollection<TreeItem>`) — for flat list view
+  - `IsExpanded` / `IsSelected` — notifying properties for UI state
 - Implements `INotifyPropertyChanged`.
 
 ### `ViewModels/MainViewModel.cs`
 - Implements `INotifyPropertyChanged`.
-- Exposes three `ActionCommand` properties: `OpenCommand`, `CloseCommand`, `AddCommand`.
-- Owns the `ObservableCollection<TreeItem> TreeItems` that drives the tree view.
-- `StatusText` property is shown in the status bar.
-- `ExecuteOpen` opens a file-picker dialog filtered to `*.ima;*.img`, creates a `DiskImageWorker`, calls `Open()`, then calls `BuildTreeView()`.
-- `BuildTreeView()` constructs root-level `TreeItem` nodes from the flat `FilesAndFolders` list. **Note:** subdirectory recursion is not yet implemented.
-- `ExecuteAdd` is a stub — currently only updates `StatusText`.
+- Commands: `OpenCommand`, `SaveCommand`, `SaveAsCommand`, `CloseCommand`, `CreateFolderCommand`, `AddFolderCommand`, `AddCommand`, `DeleteCommand`, `ExtractCommand`.
+- Properties:
+  - `TreeItems` (`ObservableCollection<TreeItem>`) — root collection for tree view
+  - `CurrentFolder` (`TreeItem?`) — currently selected folder, drives list view
+  - `SelectedItem` (`TreeItem?`) — currently selected item (file or folder)
+  - `StatusText` — status bar text
+- Events for UI communication: `CreateFolderRequested`, `CreateFolderError`, `AddError`, `DeleteError`, `ExtractError`, `SaveError`.
+- `BuildTreeView()` constructs the full tree hierarchy from `FilesAndFolders`, including subdirectories.
+- `GetSelectedFolderPath()` determines target folder for add operations based on selection.
 
 ### `Views/MainView.xaml`
-- Three-row `Grid`: menu bar (row 0), `TreeView` (row 1), `StatusBar` (row 2).
-- `DataContext` is set declaratively in XAML to `<vm:MainViewModel/>`.
-- Menu items bind directly to `OpenCommand`, `CloseCommand`, `AddCommand`.
-- `TreeView` uses a `HierarchicalDataTemplate` that binds `Children` and `Name`.
+- Three-row `Grid`: toolbar (row 0), content area (row 1), status bar (row 2).
+- Content area has two panes:
+  - Left: `TreeView` showing folder hierarchy
+  - Right: `ListView` showing contents of selected folder (Name, Date modified, Size columns)
+- Toolbar buttons with Segoe Fluent Icons for all operations.
+- `DataContext` set declaratively to `<vm:MainViewModel/>`.
+
+### `Views/FolderNameDialog.xaml`
+- Simple dialog for creating new folders.
+- Contains a `TextBox` for folder name (max 8 characters for FAT 8.3 format).
+- Returns `FolderName` property when OK is clicked.
 
 ### `Utils/ActionCommand.cs`
 - Thin `ICommand` wrapper around `Action<object?>`.
-- `Enabled` property raises `CanExecuteChanged` when toggled; used to enable/disable menu items.
+- `Enabled` property raises `CanExecuteChanged` when toggled.
 
 ### `Workers/DiskImageWorker.cs`
-- Reads the entire image file into `byte[]` on `Open()`.
-- `ParseFatFilesystem()` — validates the boot-sector signature (`0x55 0xAA` at offset 510–511), parses the BPB (BIOS Parameter Block), and calls `ReadDirectoryEntries`.
-- `ReadDirectoryEntries()` iterates 32-byte directory entries, skipping deleted/empty ones, and appends decoded 8.3 filenames to the `FilesAndFolders` list.
-- **Limitations:** only reads the root directory (no subdirectory traversal), no FAT12/FAT16/FAT32 type detection, no LFN (Long File Name) support.
+- Core FAT filesystem parser and modifier.
+- `FileEntry` record: `(string Path, long? Size, DateTime? Modified)`
+- Properties:
+  - `FilePath` — path to the image file on disk
+  - `VolumeLabel` — extracted volume label from FAT
+  - `FilesAndFolders` — list of all entries found in the image
+  - `IsLoaded` — whether the image has been opened
+- Events: `LoadingStarted`, `LoadingCompleted`
+- **Reading:**
+  - `OpenAsync()` — loads image into memory and parses FAT filesystem
+  - `GetFileContent(path)` — reads file bytes from the image
+  - `ExtractFolder(sourcePath, destPath)` — extracts entire folder to host filesystem
+- **Writing:**
+  - `SaveAsync(path)` — saves modified image to disk
+  - `AddFile(targetDirectory, fileName, content)` — adds a file to the image
+  - `AddHostDirectory(targetDirectory, hostFolderPath)` — recursively adds a host folder
+  - `CreateFolder(targetDirectory, folderName)` — creates a new folder
+  - `DeleteEntry(path)` — deletes a file or folder (recursively for folders)
+  - `GetFreeBytes()` — estimates available space on the image
+- **FAT support:** FAT12 and FAT16; handles subdirectory traversal via cluster chains.
 
 ---
 
@@ -98,6 +145,8 @@ NetImage/
 - **Data binding** is always done in XAML; code-behind files are kept minimal (no business logic).
 - **INotifyPropertyChanged** is implemented manually with `[CallerMemberName]` — do not introduce
   a base class or source generator without discussing first.
+- **UI-to-ViewModel communication** uses events on the ViewModel (e.g., `CreateFolderRequested`,
+  `AddError`) rather than direct method calls from code-behind.
 
 ---
 
