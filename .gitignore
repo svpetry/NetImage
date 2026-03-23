@@ -3,3 +3,4 @@ NetImage.Tests/bin/
 NetImage.Tests/obj/
 bin/
 obj/
+*.local.json
