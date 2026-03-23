@@ -167,11 +167,14 @@ NetImage/
 ## Building & Running
 
 ```powershell
-# Build
+# Build main project
 dotnet build NetImage.csproj
 
-# Run
+# Run application
 dotnet run --project NetImage.csproj
+
+# Run tests
+dotnet test NetImage.Tests/NetImage.Tests.csproj
 
 # Or open NetImage.slnx in Visual Studio 2022 / JetBrains Rider and press F5
 ```
@@ -182,9 +185,22 @@ The project requires the **.NET 10 SDK** and runs on **Windows only** (WPF is Wi
 
 ## Known Limitations / Future Work
 
-- `BuildTreeView()` only creates top-level nodes; subdirectory entries from `FilesAndFolders` are
-  not yet recursively placed under their parent nodes.
-- `DiskImageWorker` does not distinguish FAT12 / FAT16 / FAT32 variants.
-- LFN directory entries are silently skipped.
-- `ExecuteAdd` is a placeholder and does not yet inject files into the image.
-- No unit or integration tests exist yet.
+- **FAT format:** Only FAT12 and FAT16 are supported; FAT32 is not yet implemented.
+- **LFN (Long File Names):** Directory entries with long file names (LFN) are silently skipped.
+- **8.3 encoding:** All file/folder names are converted to 8.3 format (uppercase, truncated).
+- **Cluster allocation:** Uses simple linear search for free clusters; may be slow on large images.
+- **No undo/redo:** Modifications to the image are immediate with no undo support.
+- **No validation:** User input (e.g., folder names) is not validated for illegal FAT characters.
+- **Single-threaded UI:** File operations run synchronously on the UI thread for most operations
+  (except `OpenAsync` and `SaveAsync`).
+
+---
+
+## Testing Conventions
+
+- Tests are written using **NUnit** in the `NetImage.Tests` project.
+- Test data files (e.g., `test.ima`) are stored in `NetImage.Tests/data/` and copied to output.
+- Tests that create temporary files use `Path.GetTempPath()` with unique GUID subdirectories.
+- Use `[SetUp]` and `[TearDown]` for per-test cleanup.
+- Helper methods for creating mock FAT images are defined within test classes.
+- Prefer testing the `DiskImageWorker` directly over UI integration tests.
