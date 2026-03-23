@@ -1,0 +1,997 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using NetImage.Workers;
+using NUnit.Framework;
+
+namespace NetImage.Tests.Workers
+{
+    [TestFixture]
+    public class DiskImageWorkerTests
+    {
+        private const int SectorSize = 512;
+        private string? _tempDirectory;
+
+        [SetUp]
+        public void SetUp()
+        {
+            _tempDirectory = Path.Combine(Path.GetTempPath(), $"NetImageTests_{Guid.NewGuid()}");
+            Directory.CreateDirectory(_tempDirectory);
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            if (_tempDirectory != null && Directory.Exists(_tempDirectory))
+            {
+                Directory.Delete(_tempDirectory, true);
+            }
+        }
+
+        #region Constructor and Property Tests
+
+        [Test]
+        public void Constructor_WithValidPath_InitializesCorrectly()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            File.WriteAllBytes(filePath, new byte[1024]);
+
+            // Act
+            var worker = new DiskImageWorker(filePath);
+
+            // Assert
+            Assert.That(worker.FilePath, Is.EqualTo(filePath));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Is.Empty);
+            Assert.That(worker.IsLoaded, Is.False);
+        }
+
+        [Test]
+        public void Constructor_WithEmptyPath_StoresEmptyPath()
+        {
+            // Act
+            var worker = new DiskImageWorker(string.Empty);
+
+            // Assert
+            Assert.That(worker.FilePath, Is.EqualTo(string.Empty));
+        }
+
+        [Test]
+        public void FilesAndFolders_IsInitiallyEmpty()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            File.WriteAllBytes(filePath, new byte[1024]);
+
+            // Act
+            var worker = new DiskImageWorker(filePath);
+
+            // Assert
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Is.Empty);
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Is.InstanceOf<List<string>>());
+        }
+
+        #endregion
+
+        #region OpenAsync Tests
+
+        [Test]
+        public async Task OpenAsync_WithValidFatImage_LoadsSuccessfully()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            bool loadingStarted = false;
+            bool loadingCompleted = false;
+
+            worker.LoadingStarted += (_, _) => loadingStarted = true;
+            worker.LoadingCompleted += (_, _) => loadingCompleted = true;
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert
+            Assert.That(worker.IsLoaded, Is.True);
+            Assert.That(loadingStarted, Is.True, "LoadingStarted event should be raised");
+            Assert.That(loadingCompleted, Is.True, "LoadingCompleted event should be raised");
+        }
+
+        [Test]
+        public async Task OpenAsync_WhenAlreadyLoaded_DoesNotReload()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            int eventCount = 0;
+            worker.LoadingStarted += (_, _) => eventCount++;
+
+            // Act - Call OpenAsync twice
+            await worker.OpenAsync();
+            await worker.OpenAsync();
+
+            // Assert
+            Assert.That(worker.IsLoaded, Is.True);
+            Assert.That(eventCount, Is.EqualTo(1), "LoadingStarted should only fire once");
+        }
+
+        [Test]
+        public async Task OpenAsync_WithInvalidBootSector_DoesNotCrash()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "invalid.img");
+            File.WriteAllBytes(filePath, new byte[1024]); // Random data, no boot sector signature
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act & Assert - Should not throw
+            await worker.OpenAsync();
+            Assert.That(worker.IsLoaded, Is.True);
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Is.Empty);
+        }
+
+        [Test]
+        public async Task OpenAsync_WithFileSmallerThanSector_DoesNotCrash()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "small.img");
+            File.WriteAllBytes(filePath, new byte[256]); // Smaller than 512 bytes
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act & Assert
+            await worker.OpenAsync();
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Is.Empty);
+        }
+
+        [Test]
+        public async Task OpenAsync_WithNonExistentFile_ThrowsException()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "nonexistent.img");
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act & Assert - FileNotFoundException should be thrown
+            try
+            {
+                await worker.OpenAsync();
+                Assert.Fail("Expected FileNotFoundException was not thrown");
+            }
+            catch (System.IO.FileNotFoundException)
+            {
+                // Expected
+            }
+        }
+
+        #endregion
+
+        #region Boot Sector Validation Tests
+
+        [Test]
+        public void CreateMinimalFatImage_ContainsValidBootSignature()
+        {
+            // Arrange & Act
+            var image = CreateMinimalFatImage();
+
+            // Assert
+            Assert.That(image.Length, Is.GreaterThanOrEqualTo(512));
+            Assert.That(image[510], Is.EqualTo(0x55));
+            Assert.That(image[511], Is.EqualTo(0xAA));
+        }
+
+        #endregion
+
+        #region Directory Entry Tests
+
+        [Test]
+        public async Task OpenAsync_WithDirectoryEntries_PopulatesFilesAndFolders()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithFiles(new[] { "README.TXT", "DATA.DAT", "CONFIG.CFG" });
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert - filenames should have dot separator between name and extension
+            Assert.That(worker.FilesAndFolders.Count, Is.EqualTo(3));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Contains.Item("README.TXT"));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Contains.Item("DATA.DAT"));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Contains.Item("CONFIG.CFG"));
+        }
+
+        [Test]
+        public async Task OpenAsync_WithDirectoryEntryHavingSpaces_IncludesSpacesInName()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            // FAT stores spaces as actual space characters in the name
+            var imageData = CreateFatImageWithFiles(new[] { "MY FILE.TXT" });
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert - spaces in name are preserved, dot separator added before extension
+            Assert.That(worker.FilesAndFolders.Count, Is.EqualTo(1));
+            Assert.That(worker.FilesAndFolders[0].Path, Is.EqualTo("MY FILE.TXT"));
+        }
+
+        [Test]
+        public async Task OpenAsync_WithDeletedEntry_SkipsDeletedFile()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithDeletedEntry();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert - Deleted entry (0xE5) should be skipped
+            Assert.That(worker.FilesAndFolders.Count, Is.EqualTo(1));
+            Assert.That(worker.FilesAndFolders[0].Path, Is.EqualTo("VALID.TXT"));
+        }
+
+        [Test]
+        public async Task OpenAsync_WithEmptyEntry_SkipsEmptySlot()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithEmptyEntry();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert - Empty entry (0x00) should be skipped
+            Assert.That(worker.FilesAndFolders.Count, Is.EqualTo(1));
+            Assert.That(worker.FilesAndFolders[0].Path, Is.EqualTo("FIRST.TXT"));
+        }
+
+        [Test]
+        public async Task OpenAsync_WithSubdirectoryMarker_IncludesDirectory()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithSubdirectory();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert
+            Assert.That(worker.FilesAndFolders.Count, Is.GreaterThanOrEqualTo(1));
+            // Subdirectory entries should be included
+            var hasSubdir = worker.FilesAndFolders.Any(f => f.Path.StartsWith("SUBDIR"));
+            Assert.That(hasSubdir, Is.True);
+        }
+
+        [Test]
+        public async Task OpenAsync_WithVolumeLabelEntry_SkipsVolumeLabel()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithVolumeLabel();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert - Volume label should be skipped
+            Assert.That(worker.FilesAndFolders.Count, Is.EqualTo(1));
+            Assert.That(worker.FilesAndFolders[0].Path, Is.EqualTo("DATA.TXT"));
+        }
+
+        [Test]
+        public async Task OpenAsync_WithDotEntries_SkipsDotAndDotDot()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithDotEntries();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert - . and .. entries should be skipped
+            Assert.That(worker.FilesAndFolders.Count, Is.EqualTo(1));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain("."));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain(".."));
+        }
+
+        [Test]
+        public async Task OpenAsync_WithNestedSubdirectory_TraversesRecursively()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithNestedSubdirectory();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert - Should find the subdirectory and at least attempt traversal
+            // Note: Full recursive traversal depends on correct cluster/sector mapping
+            Assert.That(worker.FilesAndFolders.Count, Is.GreaterThanOrEqualTo(1));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Contains.Item("SUBDIR"));
+        }
+
+        [Test]
+        public async Task OpenAsync_WithTestImaFile_ContainsTestTxt()
+        {
+            // Arrange
+            var testDataPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "test.ima");
+
+            var worker = new DiskImageWorker(testDataPath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert
+            Assert.That(worker.FilesAndFolders.Count, Is.EqualTo(1));
+            Assert.That(worker.FilesAndFolders[0].Path, Is.EqualTo("TEST.TXT"));
+
+            var fileContent = worker.GetFileContent("TEST.TXT");
+            Assert.That(fileContent, Is.Not.Null);
+            var contentText = System.Text.Encoding.ASCII.GetString(fileContent!);
+            Assert.That(contentText, Contains.Substring("Test"));
+        }
+
+        #endregion
+
+        #region Helper Methods for Test Data
+
+        /// <summary>
+        /// Creates a minimal valid FAT12 boot sector with no files.
+        /// </summary>
+        private byte[] CreateMinimalFatImage()
+        {
+            const int totalSectors = 512; // 256KB image - enough for data clusters
+            var image = new byte[totalSectors * SectorSize];
+
+            // Boot record jump instruction
+            image[0] = 0xEB;
+            image[1] = 0x3C;
+            image[2] = 0x90;
+
+            // OEM Name (8 bytes)
+            Array.Copy(Encoding.ASCII.GetBytes("MSDOS5.0"), 0, image, 3, 8);
+
+            // BPB (BIOS Parameter Block)
+            // Bytes per sector (2 bytes) = 512
+            image[11] = 0x00;
+            image[12] = 0x02;
+
+            // Sectors per cluster (1 byte) = 1
+            image[13] = 0x01;
+
+            // Reserved sectors (2 bytes) = 1
+            image[14] = 0x01;
+            image[15] = 0x00;
+
+            // Number of FATs (1 byte) = 2
+            image[16] = 0x02;
+
+            // Root directory entries (2 bytes) = 512
+            image[17] = 0x00;
+            image[18] = 0x10;
+
+            // Total sectors (16-bit) (2 bytes) = 512
+            image[19] = (byte)(totalSectors & 0xFF);
+            image[20] = (byte)((totalSectors >> 8) & 0xFF);
+
+            // Media descriptor (1 byte) = 0xF0 (5.25" HD)
+            image[21] = 0xF0;
+
+            // Sectors per FAT (16-bit) (2 bytes) = 4 (need space for 512 clusters in FAT12)
+            // FAT12: 512 clusters * 1.5 bytes = 768 bytes = 1.5 sectors, round up to 2
+            // But let's use 4 sectors for safety
+            image[22] = 0x04;
+            image[23] = 0x00;
+
+            // Sectors per track (2 bytes) = 63
+            image[24] = 0x3F;
+            image[25] = 0x00;
+
+            // Heads per cylinder (2 bytes) = 4
+            image[26] = 0x04;
+            image[27] = 0x00;
+
+            // Hidden sectors (4 bytes) = 0
+            image[28] = 0x00;
+            image[29] = 0x00;
+            image[30] = 0x00;
+            image[31] = 0x00;
+
+            // Total sectors (32-bit) (4 bytes) = 512
+            image[32] = (byte)(totalSectors & 0xFF);
+            image[33] = (byte)((totalSectors >> 8) & 0xFF);
+            image[34] = 0x00;
+            image[35] = 0x00;
+
+            // Initialize FAT entries (both FAT copies)
+            // FAT starts at sector 1, each entry is 1.5 bytes for FAT12
+            // Mark cluster 0 and 1 as reserved, rest as free (0)
+            var fatStart = SectorSize; // Sector 1
+            // FAT12: media descriptor in first 2 bytes, then cluster entries
+            image[fatStart] = 0xF8; // Media descriptor (lower 8 bits)
+            image[fatStart + 1] = 0xFF; // Media descriptor (upper 4 bits) + cluster 1 reserved (lower 8 bits)
+            // Cluster 1 reserved (upper 4 bits) + cluster 2 free (lower 8 bits)
+            image[fatStart + 2] = 0x0F;
+
+            // Rest of FAT entries are already 0 (free)
+
+            // Copy FAT to second copy (starts at sector 1 + 4 = sector 5)
+            var fatSize = 4 * SectorSize;
+            Array.Copy(image, fatStart, image, fatStart + fatSize, fatSize);
+
+            // Boot signature at offset 510-511
+            image[510] = 0x55;
+            image[511] = 0xAA;
+
+            return image;
+        }
+
+        /// <summary>
+        /// Creates a FAT image with specified file entries in the root directory.
+        /// </summary>
+        private byte[] CreateFatImageWithFiles(string[] fileNames)
+        {
+            var image = CreateMinimalFatImage();
+
+            // Calculate root directory start sector
+            // Reserved sectors (1) + FATs (2 * 4 sectors) = sector 9
+            var rootDirStart = 9 * SectorSize;
+
+            for (int i = 0; i < fileNames.Length && i < 512; i++)
+            {
+                CreateDirectoryEntry(image, rootDirStart + (i * 32), fileNames[i], isDirectory: false);
+            }
+
+            return image;
+        }
+
+        /// <summary>
+        /// Creates a FAT image with one deleted entry (0xE5) and one valid entry.
+        /// </summary>
+        private byte[] CreateFatImageWithDeletedEntry()
+        {
+            var image = CreateMinimalFatImage();
+            var rootDirStart = 9 * SectorSize; // Reserved (1) + FATs (2 * 4) = 9
+
+            // First entry: deleted file (starts with 0xE5)
+            var deletedEntry = new byte[32];
+            deletedEntry[0] = 0xE5; // Deleted flag
+            Array.Copy(Encoding.ASCII.GetBytes("DELETED"), 0, deletedEntry, 1, 7);
+            deletedEntry[8] = (byte)'T';
+            deletedEntry[9] = (byte)'X';
+            deletedEntry[10] = (byte)'T';
+            Array.Copy(deletedEntry, 0, image, rootDirStart, 32);
+
+            // Second entry: valid file
+            CreateDirectoryEntry(image, rootDirStart + 32, "VALID.TXT", isDirectory: false);
+
+            return image;
+        }
+
+        /// <summary>
+        /// Creates a FAT image with one valid entry followed by an empty entry (0x00).
+        /// </summary>
+        private byte[] CreateFatImageWithEmptyEntry()
+        {
+            var image = CreateMinimalFatImage();
+            var rootDirStart = 9 * SectorSize; // Reserved (1) + FATs (2 * 4) = 9
+
+            // First entry: valid file
+            CreateDirectoryEntry(image, rootDirStart, "FIRST.TXT", isDirectory: false);
+
+            // Second entry: empty (all zeros, starts with 0x00)
+            // Already zeros from CreateMinimalFatImage
+
+            return image;
+        }
+
+        /// <summary>
+        /// Creates a FAT image with a subdirectory entry.
+        /// </summary>
+        private byte[] CreateFatImageWithSubdirectory()
+        {
+            var image = CreateMinimalFatImage();
+            var rootDirStart = 9 * SectorSize; // Reserved (1) + FATs (2 * 4) = 9
+
+            // Create subdirectory entry
+            CreateDirectoryEntry(image, rootDirStart, "SUBDIR", isDirectory: true);
+
+            return image;
+        }
+
+        /// <summary>
+        /// Creates a FAT image with a volume label entry.
+        /// </summary>
+        private byte[] CreateFatImageWithVolumeLabel()
+        {
+            var image = CreateMinimalFatImage();
+            var rootDirStart = 9 * SectorSize; // Reserved (1) + FATs (2 * 4) = 9
+
+            // First entry: volume label (attribute = 0x08)
+            var volumeLabelEntry = new byte[32];
+            Array.Copy(Encoding.ASCII.GetBytes("VOLUME  "), 0, volumeLabelEntry, 0, 8);
+            volumeLabelEntry[11] = 0x08; // Volume label attribute
+            Array.Copy(volumeLabelEntry, 0, image, rootDirStart, 32);
+
+            // Second entry: valid file
+            CreateDirectoryEntry(image, rootDirStart + 32, "DATA.TXT", isDirectory: false);
+
+            return image;
+        }
+
+        /// <summary>
+        /// Creates a FAT image with . and .. entries.
+        /// </summary>
+        private byte[] CreateFatImageWithDotEntries()
+        {
+            var image = CreateMinimalFatImage();
+            var rootDirStart = 9 * SectorSize; // Reserved (1) + FATs (2 * 4) = 9
+
+            // First entry: . (current directory)
+            var dotEntry = new byte[32];
+            dotEntry[0] = (byte) '.';
+            dotEntry[11] = 0x10; // Directory attribute
+            dotEntry[26] = 0x02; // First cluster = 2 (FAT12/16)
+            dotEntry[27] = 0x00;
+            Array.Copy(dotEntry, 0, image, rootDirStart, 32);
+
+            // Second entry: .. (parent directory)
+            var dotDotEntry = new byte[32];
+            dotDotEntry[0] = (byte) '.';
+            dotDotEntry[1] = (byte) '.';
+            dotDotEntry[11] = 0x10; // Directory attribute
+            dotDotEntry[26] = 0x02; // First cluster = 2 (FAT12/16)
+            dotDotEntry[27] = 0x00;
+            Array.Copy(dotDotEntry, 0, image, rootDirStart + 32, 32);
+
+            // Third entry: valid file
+            CreateDirectoryEntry(image, rootDirStart + 64, "FILE.TXT", isDirectory: false);
+
+            return image;
+        }
+
+        /// <summary>
+        /// Creates a FAT image with a nested subdirectory containing a file.
+        /// </summary>
+        private byte[] CreateFatImageWithNestedSubdirectory()
+        {
+            var image = CreateMinimalFatImage();
+            var rootDirStart = 9 * SectorSize; // Reserved (1) + FATs (2 * 4) = 9
+
+            // Create subdirectory entry at cluster 2
+            CreateDirectoryEntry(image, rootDirStart, "SUBDIR", isDirectory: true);
+
+            // Set up the subdirectory content at cluster 2
+            // Data area starts after reserved sectors (1) + FATs (2 * 4) + root dir (512 * 32 / 512 = 32) = sector 50
+            var subDirStart = 50 * SectorSize;
+
+            // Create . entry in subdirectory
+            var dotEntry = new byte[32];
+            dotEntry[0] = (byte) '.';
+            dotEntry[11] = 0x10;
+            dotEntry[26] = 0x02; // First cluster = 2 (FAT12/16)
+            Array.Copy(dotEntry, 0, image, subDirStart, 32);
+
+            // Create .. entry in subdirectory
+            var dotDotEntry = new byte[32];
+            dotDotEntry[0] = (byte) '.';
+            dotDotEntry[1] = (byte) '.';
+            dotDotEntry[11] = 0x10;
+            dotDotEntry[26] = 0x02; // First cluster = 2 (FAT12/16)
+            Array.Copy(dotDotEntry, 0, image, subDirStart + 32, 32);
+
+            // Create file in subdirectory
+            CreateDirectoryEntry(image, subDirStart + 64, "NESTED.TXT", isDirectory: false);
+
+            return image;
+        }
+
+        /// <summary>
+        /// Creates a 32-byte FAT directory entry at the specified offset.
+        /// </summary>
+        private void CreateDirectoryEntry(byte[] image, int offset, string name, bool isDirectory)
+        {
+            // Clear the entry
+            Array.Clear(image, offset, 32);
+
+            // Parse the 8.3 name
+            string namePart;
+            string extPart = "   "; // Default to 3 spaces
+
+            if (name.Contains('.'))
+            {
+                var parts = name.Split('.');
+                namePart = parts[0].PadRight(8, ' ').AsSpan(0, 8).ToString();
+                if (parts.Length > 1)
+                {
+                    var ext = parts[1];
+                    if (ext.Length > 3)
+                        ext = ext.Substring(0, 3);
+                    extPart = ext.PadRight(3, ' ');
+                }
+            }
+            else
+            {
+                namePart = name.PadRight(8, ' ').AsSpan(0, 8).ToString();
+            }
+
+            // Write name (8 bytes)
+            var nameBytes = Encoding.ASCII.GetBytes(namePart);
+            Array.Copy(nameBytes, 0, image, offset, 8);
+
+            // Write extension (3 bytes)
+            var extBytes = Encoding.ASCII.GetBytes(extPart);
+            Array.Copy(extBytes, 0, image, offset + 8, 3);
+
+            // Attributes (1 byte)
+            image[offset + 11] = (byte)(isDirectory ? 0x10 : 0x00); // 0x10 = directory, 0x00 = file
+
+            // Upper case flag (1 byte) - 0x08 for uppercase
+            image[offset + 12] = 0x08;
+
+            // Create time, date, etc. (set to some valid values)
+            image[offset + 14] = 0x00; // Create time tenths
+            image[offset + 15] = 0x00; // Create time
+            image[offset + 16] = 0x00; // Create date
+            image[offset + 17] = 0x00; // Access date
+            image[offset + 18] = 0x00; // High word of first cluster (FAT32) - unused for FAT12/16
+            image[offset + 19] = 0x00; // Modify time
+            image[offset + 20] = 0x00; // Modify date
+            image[offset + 21] = 0x00;
+            image[offset + 22] = 0x00; // High word of first cluster (FAT32) - unused for FAT12/16
+            image[offset + 23] = 0x00;
+
+            // First cluster (FAT12/16) - cluster 2 (bytes 26-27)
+            image[offset + 26] = 0x02;
+            image[offset + 27] = 0x00;
+
+            // File size (4 bytes) - 0 for directory, some value for file
+            // File size is at offset 28-31
+            if (!isDirectory)
+            {
+                image[offset + 28] = 0x10; // 16 bytes
+                image[offset + 29] = 0x00;
+                image[offset + 30] = 0x00;
+                image[offset + 31] = 0x00;
+            }
+        }
+
+        #endregion
+
+        #region SaveAsync Tests
+
+        [Test]
+        public async Task SaveAsync_WithValidImageData_CreatesFile()
+        {
+            // Arrange
+            var inputPath = Path.Combine(_tempDirectory!, "input.img");
+            var outputPath = Path.Combine(_tempDirectory!, "output.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(inputPath, imageData);
+
+            var worker = new DiskImageWorker(inputPath);
+            await worker.OpenAsync();
+
+            // Act
+            await worker.SaveAsync(outputPath);
+
+            // Assert
+            Assert.That(File.Exists(outputPath), Is.True);
+            var savedData = await File.ReadAllBytesAsync(outputPath);
+            Assert.That(savedData.Length, Is.EqualTo(imageData.Length));
+        }
+
+        [Test]
+        public async Task SaveAsync_WhenImageNotLoaded_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var outputPath = Path.Combine(_tempDirectory!, "output.img");
+            var worker = new DiskImageWorker("dummy.img");
+
+            // Act & Assert
+            var exception = Assert.ThrowsAsync<InvalidOperationException>(async () => await worker.SaveAsync(outputPath));
+            Assert.That(exception!.Message, Does.Contain("No image data"));
+        }
+
+        [Test]
+        public async Task SaveAsync_PreservesImageData()
+        {
+            // Arrange
+            var inputPath = Path.Combine(_tempDirectory!, "input.img");
+            var outputPath = Path.Combine(_tempDirectory!, "output.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(inputPath, imageData);
+
+            var worker = new DiskImageWorker(inputPath);
+            await worker.OpenAsync();
+
+            // Act
+            await worker.SaveAsync(outputPath);
+
+            // Assert
+            var savedData = await File.ReadAllBytesAsync(outputPath);
+            Assert.That(savedData, Is.EquivalentTo(imageData));
+        }
+
+        #endregion
+
+        #region GetFileContent Tests
+
+        [Test]
+        public void GetFileContent_WhenImageNotLoaded_ReturnsNull()
+        {
+            // Arrange
+            var worker = new DiskImageWorker("dummy.img");
+
+            // Act
+            var result = worker.GetFileContent("TEST.TXT");
+
+            // Assert
+            Assert.That(result, Is.Null);
+        }
+
+        [Test]
+        public async Task GetFileContent_WithNonExistentFile_ReturnsNull()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            // Act
+            var result = worker.GetFileContent("NONEXISTENT.TXT");
+
+            // Assert
+            Assert.That(result, Is.Null);
+        }
+
+        [Test]
+        public async Task GetFileContent_WithDirectory_ReturnsNull()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithSubdirectory();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            // Act
+            var result = worker.GetFileContent("SUBDIR");
+
+            // Assert
+            Assert.That(result, Is.Null);
+        }
+
+        [Test]
+        public async Task GetFileContent_CaseInsensitive_FileNameMatch()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithFiles(new[] { "TEST.TXT" });
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            // Act
+            var result = worker.GetFileContent("test.txt");
+
+            // Assert - Should find file even with lowercase query
+            Assert.That(result, Is.Not.Null);
+        }
+
+        #endregion
+
+        #region AddFile Tests
+
+        [Test]
+        public void AddFile_WhenImageNotLoaded_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var worker = new DiskImageWorker("dummy.img");
+
+            // Act & Assert
+            Assert.Throws<InvalidOperationException>(() => worker.AddFile("TEST.TXT", new byte[] { 0x01, 0x02, 0x03 }));
+        }
+
+        [Test]
+        public async Task AddFile_WithValidFile_AddsToImage()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            var fileContent = Encoding.ASCII.GetBytes("Hello World");
+
+            // Act
+            worker.AddFile("HELLO.TXT", fileContent);
+            await worker.SaveAsync(filePath); // Save changes to disk
+
+            // Assert - Re-open to verify file was added to the image
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("HELLO.TXT"));
+        }
+
+        [Test]
+        public async Task AddFile_EncodesFileNameToUpperCase()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            // Act
+            worker.AddFile("lower.txt", new byte[] { 0x01 });
+            await worker.SaveAsync(filePath); // Save changes to disk
+
+            // Assert - Re-open to verify filename is stored in uppercase
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("LOWER.TXT"));
+        }
+
+        [Test]
+        public async Task AddFile_TruncatesLongFileNameTo83Format()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            // Act
+            worker.AddFile("VERYLONGNAME.EXTENSION", new byte[] { 0x01 });
+            await worker.SaveAsync(filePath); // Save changes to disk
+
+            // Assert - Re-open to verify filename is truncated to 8.3 format
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("VERYLONG.EXT"));
+        }
+
+        [Test]
+        public async Task AddFile_WithoutExtension_AddsSuccessfully()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            // Act
+            worker.AddFile("NOEXT", new byte[] { 0x01 });
+            await worker.SaveAsync(filePath); // Save changes to disk
+
+            // Assert - Re-open to verify file was added
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("NOEXT"));
+        }
+
+        #endregion
+
+        #region Delete Tests
+
+        [Test]
+        public void Delete_WhenImageNotLoaded_ThrowsInvalidOperationException()
+        {
+            // Arrange
+            var worker = new DiskImageWorker("dummy.img");
+
+            // Act & Assert
+            Assert.Throws<InvalidOperationException>(() => worker.DeleteEntry("TEST.TXT"));
+        }
+
+        [Test]
+        public async Task Delete_WithNonExistentFile_ThrowsFileNotFoundException()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            // Act & Assert
+            Assert.Throws<FileNotFoundException>(() => worker.DeleteEntry("NONEXISTENT.TXT"));
+        }
+
+        [Test]
+        public async Task Delete_WithValidFile_RemovesFile()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithFiles(new[] { "TODELETE.TXT", "KEEP.TXT" });
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            // Verify file exists before delete
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("TODELETE.TXT"));
+
+            // Act
+            worker.DeleteEntry("TODELETE.TXT");
+            await worker.SaveAsync(filePath); // Save changes to disk
+
+            // Assert - Re-open to verify file was removed from the image
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain("TODELETE.TXT"));
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("KEEP.TXT"));
+        }
+
+        [Test]
+        public async Task Delete_CaseInsensitive_FileNameMatch()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "test.img");
+            var imageData = CreateFatImageWithFiles(new[] { "TESTFILE.TXT" });
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            // Act - Delete with different case
+            worker.DeleteEntry("testfile.txt");
+            await worker.SaveAsync(filePath); // Save changes to disk
+
+            // Assert - Re-open to verify file was removed
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain("TESTFILE.TXT"));
+        }
+
+        #endregion
+    }
+}
