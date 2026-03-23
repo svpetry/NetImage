@@ -23,6 +23,7 @@ namespace NetImage.Views
             InitializeComponent();
             MainTreeView.SelectedItemChanged += OnTreeViewSelectedItemChanged;
             EventManager.RegisterClassHandler(typeof(TreeViewItem), FrameworkElement.LoadedEvent, new RoutedEventHandler(OnTreeViewItemLoaded));
+            EventManager.RegisterClassHandler(typeof(GridViewColumnHeader), MouseLeftButtonUpEvent, new MouseButtonEventHandler(GridViewHeader_MouseLeftButtonUp));
 
             if (DataContext is MainViewModel vm)
             {
@@ -135,37 +136,36 @@ namespace NetImage.Views
         }
 
         private void GridViewHeader_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
-{
-    if (sender is TextBlock header && header.Tag is string sortProp)
-    {
-        var list = MainListView.ItemsSource as IList;
-        if (list == null) return;
-
-        // Toggle direction if same column, otherwise default to ascending
-        if (_currentSortProp == sortProp)
         {
-            _currentSortDirection = _currentSortDirection == ListSortDirection.Ascending
-                ? ListSortDirection.Descending
-                : ListSortDirection.Ascending;
-        }
-        else
-        {
-            _currentSortDirection = ListSortDirection.Ascending;
-            _currentSortProp = sortProp;
+            if (sender is not GridViewColumnHeader header ||
+                header.Column?.Header is not FrameworkElement { Tag: string sortProp })
+            {
+                return;
+            }
+
+            // Toggle direction if same column, otherwise default to ascending
+            if (_currentSortProp == sortProp)
+            {
+                _currentSortDirection = _currentSortDirection == ListSortDirection.Ascending
+                    ? ListSortDirection.Descending
+                    : ListSortDirection.Ascending;
+            }
+            else
+            {
+                _currentSortDirection = ListSortDirection.Ascending;
+                _currentSortProp = sortProp;
+            }
+
+            // Apply sort using the ListView's Items collection view
+            var items = MainListView.Items;
+            if (items != null)
+            {
+                items.SortDescriptions.Clear();
+                items.SortDescriptions.Add(new SortDescription(sortProp, _currentSortDirection));
+            }
         }
 
-        // Apply sort
-        var sortDescription = new SortDescription(sortProp, _currentSortDirection);
-        ICollectionView view = CollectionViewSource.GetDefaultView(list);
-        if (view != null)
-        {
-            view.SortDescriptions.Clear();
-            view.SortDescriptions.Add(sortDescription);
-        }
-    }
-}
-
-private static void OnTreeViewItemLoaded(object sender, RoutedEventArgs e)
+        private static void OnTreeViewItemLoaded(object sender, RoutedEventArgs e)
         {
             if (sender is TreeViewItem item)
             {

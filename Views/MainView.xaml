@@ -150,17 +150,17 @@
                         </GridViewColumn>
                         <GridViewColumn DisplayMemberBinding="{Binding Name}" Width="250">
                             <GridViewColumn.Header>
-                                <TextBlock Text="Name" MouseLeftButtonUp="GridViewHeader_MouseLeftButtonUp" Tag="Name" Cursor="Hand"/>
+                                <TextBlock Text="Name" Tag="Name"/>
                             </GridViewColumn.Header>
                         </GridViewColumn>
                         <GridViewColumn DisplayMemberBinding="{Binding FormattedModified}" Width="150">
                             <GridViewColumn.Header>
-                                <TextBlock Text="Date modified" MouseLeftButtonUp="GridViewHeader_MouseLeftButtonUp" Tag="Date" Cursor="Hand"/>
+                                <TextBlock Text="Date modified" Tag="Modified"/>
                             </GridViewColumn.Header>
                         </GridViewColumn>
                         <GridViewColumn Width="100">
                             <GridViewColumn.Header>
-                                <TextBlock Text="Size" MouseLeftButtonUp="GridViewHeader_MouseLeftButtonUp" Tag="Size" Cursor="Hand"/>
+                                <TextBlock Text="Size" Tag="Size"/>
                             </GridViewColumn.Header>
                             <GridViewColumn.CellTemplate>
                                 <DataTemplate>

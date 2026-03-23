@@ -344,6 +344,48 @@ namespace NetImage.Tests.Workers
         }
 
         [Test]
+        public async Task OpenAsync_WithFat16DirectoryAtHighCluster_IncludesNestedFile()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "fat16-highcluster.img");
+            var imageData = CreateFat16ImageWithHighClusterSubdirectory();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Contains.Item("SUBDIR"));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Contains.Item("SUBDIR\\FILE.TXT"));
+
+            var fileContent = worker.GetFileContent("SUBDIR\\FILE.TXT");
+            Assert.That(fileContent, Is.Not.Null);
+            Assert.That(Encoding.ASCII.GetString(fileContent!), Is.EqualTo("TEST"));
+        }
+
+        [Test]
+        public async Task GetFileContent_WithFat16DirectorySpanningMultipleClusters_FindsFileInLaterCluster()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "fat16-dirchain.img");
+            var imageData = CreateFat16ImageWithMultiClusterDirectory();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+            var fileContent = worker.GetFileContent("SUBDIR\\SECOND.TXT");
+
+            // Assert
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Contains.Item("SUBDIR\\SECOND.TXT"));
+            Assert.That(fileContent, Is.Not.Null);
+            Assert.That(Encoding.ASCII.GetString(fileContent!), Is.EqualTo("DATA"));
+        }
+
+        [Test]
         public async Task OpenAsync_WithTestImaFile_ContainsTestTxt()
         {
             // Arrange
@@ -617,6 +659,173 @@ namespace NetImage.Tests.Workers
             CreateDirectoryEntry(image, subDirStart + 64, "NESTED.TXT", isDirectory: false);
 
             return image;
+        }
+
+        private byte[] CreateFat16ImageWithHighClusterSubdirectory()
+        {
+            var image = CreateMinimalFat16Image();
+            var layout = GetFat16Layout();
+
+            SetFat16Entry(image, 4096, 0xFFFF);
+            SetFat16Entry(image, 4097, 0xFFFF);
+
+            WriteFat16DirectoryEntry(image, layout.RootDirectoryOffset, "SUBDIR", isDirectory: true, firstCluster: 4096, fileSize: 0);
+
+            var subdirectoryOffset = GetFat16ClusterOffset(4096);
+            WriteFat16DirectoryEntry(image, subdirectoryOffset, ".", isDirectory: true, firstCluster: 4096, fileSize: 0);
+            WriteFat16DirectoryEntry(image, subdirectoryOffset + 32, "..", isDirectory: true, firstCluster: 0, fileSize: 0);
+            WriteFat16DirectoryEntry(image, subdirectoryOffset + 64, "FILE.TXT", isDirectory: false, firstCluster: 4097, fileSize: 4);
+
+            var fileOffset = GetFat16ClusterOffset(4097);
+            Array.Copy(Encoding.ASCII.GetBytes("TEST"), 0, image, fileOffset, 4);
+
+            return image;
+        }
+
+        private byte[] CreateFat16ImageWithMultiClusterDirectory()
+        {
+            var image = CreateMinimalFat16Image();
+            var layout = GetFat16Layout();
+
+            SetFat16Entry(image, 2, 3);
+            SetFat16Entry(image, 3, 0xFFFF);
+            SetFat16Entry(image, 4, 0xFFFF);
+
+            WriteFat16DirectoryEntry(image, layout.RootDirectoryOffset, "SUBDIR", isDirectory: true, firstCluster: 2, fileSize: 0);
+
+            var firstClusterOffset = GetFat16ClusterOffset(2);
+            WriteFat16DirectoryEntry(image, firstClusterOffset, ".", isDirectory: true, firstCluster: 2, fileSize: 0);
+            WriteFat16DirectoryEntry(image, firstClusterOffset + 32, "..", isDirectory: true, firstCluster: 0, fileSize: 0);
+            for (int entryIndex = 2; entryIndex < 16; entryIndex++)
+            {
+                image[firstClusterOffset + (entryIndex * 32)] = 0xE5;
+            }
+
+            var secondClusterOffset = GetFat16ClusterOffset(3);
+            WriteFat16DirectoryEntry(image, secondClusterOffset, "SECOND.TXT", isDirectory: false, firstCluster: 4, fileSize: 4);
+
+            var fileOffset = GetFat16ClusterOffset(4);
+            Array.Copy(Encoding.ASCII.GetBytes("DATA"), 0, image, fileOffset, 4);
+
+            return image;
+        }
+
+        private byte[] CreateMinimalFat16Image()
+        {
+            const ushort totalSectors = 5000;
+            const ushort sectorsPerFat = 20;
+            const ushort rootDirEntries = 512;
+            const byte sectorsPerCluster = 1;
+            const byte numFats = 2;
+            const ushort reservedSectors = 1;
+
+            var image = new byte[totalSectors * SectorSize];
+
+            image[0] = 0xEB;
+            image[1] = 0x3C;
+            image[2] = 0x90;
+
+            Array.Copy(Encoding.ASCII.GetBytes("MSDOS5.0"), 0, image, 3, 8);
+
+            image[11] = 0x00;
+            image[12] = 0x02;
+            image[13] = sectorsPerCluster;
+            image[14] = (byte)(reservedSectors & 0xFF);
+            image[15] = (byte)(reservedSectors >> 8);
+            image[16] = numFats;
+            image[17] = (byte)(rootDirEntries & 0xFF);
+            image[18] = (byte)(rootDirEntries >> 8);
+            image[19] = (byte)(totalSectors & 0xFF);
+            image[20] = (byte)(totalSectors >> 8);
+            image[21] = 0xF8;
+            image[22] = (byte)(sectorsPerFat & 0xFF);
+            image[23] = (byte)(sectorsPerFat >> 8);
+            image[24] = 0x3F;
+            image[25] = 0x00;
+            image[26] = 0xFF;
+            image[27] = 0x00;
+            image[510] = 0x55;
+            image[511] = 0xAA;
+
+            SetFat16Entry(image, 0, 0xFFF8);
+            SetFat16Entry(image, 1, 0xFFFF);
+
+            return image;
+        }
+
+        private (int Fat1Offset, int Fat2Offset, int RootDirectoryOffset, int DataOffset) GetFat16Layout()
+        {
+            const int reservedSectors = 1;
+            const int sectorsPerFat = 20;
+            const int numFats = 2;
+            const int rootDirEntries = 512;
+
+            var fat1Offset = reservedSectors * SectorSize;
+            var fat2Offset = fat1Offset + (sectorsPerFat * SectorSize);
+            var rootDirectoryOffset = (reservedSectors + (numFats * sectorsPerFat)) * SectorSize;
+            var rootDirectorySectors = (rootDirEntries * 32) / SectorSize;
+            var dataOffset = (reservedSectors + (numFats * sectorsPerFat) + rootDirectorySectors) * SectorSize;
+
+            return (fat1Offset, fat2Offset, rootDirectoryOffset, dataOffset);
+        }
+
+        private int GetFat16ClusterOffset(ushort cluster)
+        {
+            var layout = GetFat16Layout();
+            return layout.DataOffset + ((cluster - 2) * SectorSize);
+        }
+
+        private void SetFat16Entry(byte[] image, ushort cluster, ushort value)
+        {
+            var layout = GetFat16Layout();
+
+            var fat1Offset = layout.Fat1Offset + (cluster * 2);
+            image[fat1Offset] = (byte)(value & 0xFF);
+            image[fat1Offset + 1] = (byte)(value >> 8);
+
+            var fat2Offset = layout.Fat2Offset + (cluster * 2);
+            image[fat2Offset] = (byte)(value & 0xFF);
+            image[fat2Offset + 1] = (byte)(value >> 8);
+        }
+
+        private void WriteFat16DirectoryEntry(byte[] image, int offset, string name, bool isDirectory, ushort firstCluster, uint fileSize)
+        {
+            Array.Clear(image, offset, 32);
+
+            string namePart;
+            var extPart = "   ";
+
+            if (name == ".")
+            {
+                namePart = ".       ";
+            }
+            else if (name == "..")
+            {
+                namePart = "..      ";
+            }
+            else if (name.Contains('.'))
+            {
+                var parts = name.Split('.');
+                namePart = parts[0].PadRight(8, ' ').AsSpan(0, 8).ToString().ToUpperInvariant();
+                if (parts.Length > 1)
+                {
+                    extPart = parts[1].PadRight(3, ' ').AsSpan(0, 3).ToString().ToUpperInvariant();
+                }
+            }
+            else
+            {
+                namePart = name.PadRight(8, ' ').AsSpan(0, 8).ToString().ToUpperInvariant();
+            }
+
+            Array.Copy(Encoding.ASCII.GetBytes(namePart), 0, image, offset, 8);
+            Array.Copy(Encoding.ASCII.GetBytes(extPart), 0, image, offset + 8, 3);
+            image[offset + 11] = (byte)(isDirectory ? 0x10 : 0x00);
+            image[offset + 26] = (byte)(firstCluster & 0xFF);
+            image[offset + 27] = (byte)(firstCluster >> 8);
+            image[offset + 28] = (byte)(fileSize & 0xFF);
+            image[offset + 29] = (byte)((fileSize >> 8) & 0xFF);
+            image[offset + 30] = (byte)((fileSize >> 16) & 0xFF);
+            image[offset + 31] = (byte)((fileSize >> 24) & 0xFF);
         }
 
         /// <summary>

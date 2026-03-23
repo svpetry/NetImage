@@ -100,25 +100,26 @@ namespace NetImage.Workers
             System.Diagnostics.Debug.WriteLine($"FAT boot sector found at sector {_partitionStartSector}");
 
             var bpb = ParseBpb(bootSector);
+            if (GetFatType(bpb) == FatType.Fat32)
+            {
+                System.Diagnostics.Debug.WriteLine("FAT32 is not supported.");
+                return;
+            }
 
             System.Diagnostics.Debug.WriteLine($"BPB: BytesPerSector={bpb.BytesPerSector}, SectorsPerCluster={bpb.SectorsPerCluster}, ReservedSectors={bpb.ReservedSectors}, NumFats={bpb.NumFats}, RootDirEntries={bpb.RootDirEntries}, TotalSectors16={bpb.TotalSectors16}, TotalSectors32={bpb.TotalSectors32}, SectorsPerFat16={bpb.SectorsPerFat16}, SectorsPerFat={bpb.SectorsPerFat}");
 
-            // Adjust root directory start based on partition offset (in sectors)
-            var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
+            var rootDirectory = GetRootDirectory(bpb);
 
-            var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
-            var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
+            System.Diagnostics.Debug.WriteLine($"Root directory: startSector={rootDirectory.StartSector}, sizeSectors={rootDirectory.NumSectors}, entries={bpb.RootDirEntries}");
 
-            System.Diagnostics.Debug.WriteLine($"Root directory: startSector={rootDirStart}, sizeSectors={rootDirSizeSectors}, entries={rootDirEntries}");
-
-            ExtractVolumeLabel(rootDirStart, rootDirSizeSectors, bpb);
+            ExtractVolumeLabel(rootDirectory.StartSector, rootDirectory.NumSectors, bpb);
 
             if (string.IsNullOrWhiteSpace(VolumeLabel))
             {
                 VolumeLabel = System.IO.Path.GetFileNameWithoutExtension(FilePath);
             }
 
-            ReadDirectoryEntries(rootDirStart, rootDirSizeSectors, string.Empty, bpb);
+            ReadDirectoryEntries(rootDirectory, string.Empty, bpb);
         }
 
         /// <summary>
@@ -259,18 +260,59 @@ namespace NetImage.Workers
             return true;
         }
 
-        private bool IsFat12(Bpb bpb)
+        private FatType GetFatType(Bpb bpb)
         {
-            // FAT12: TotalSectors16 <= 4085 (and TotalSectors16 != 0, since 0 means use TotalSectors32)
-            // FAT16: TotalSectors16 > 4085 OR (TotalSectors16 == 0 AND TotalSectors32 <= 65525)
-            // FAT32: TotalSectors32 > 65525
-            if (bpb.TotalSectors16 != 0)
-            {
-                return bpb.TotalSectors16 <= 4085;
-            }
-            // TotalSectors16 is 0, so use TotalSectors32
-            return bpb.TotalSectors32 <= 4085;
+            if (bpb.ClusterCount < 4085)
+                return FatType.Fat12;
+
+            if (bpb.ClusterCount < 65525)
+                return FatType.Fat16;
+
+            return FatType.Fat32;
         }
+
+        private bool IsFat12(Bpb bpb) => GetFatType(bpb) == FatType.Fat12;
+
+        private bool IsEndOfChain(uint clusterValue, Bpb bpb)
+        {
+            return GetFatType(bpb) switch
+            {
+                FatType.Fat12 => clusterValue >= 0x0FF8,
+                FatType.Fat16 => clusterValue >= 0xFFF8,
+                _ => clusterValue >= 0x0FFFFFF8
+            };
+        }
+
+        private uint GetEndOfChainMarker(Bpb bpb)
+        {
+            return GetFatType(bpb) switch
+            {
+                FatType.Fat12 => 0x0FFF,
+                FatType.Fat16 => 0xFFFF,
+                _ => 0x0FFFFFFF
+            };
+        }
+
+        private bool IsDataCluster(uint cluster, Bpb bpb)
+            => cluster >= 2 && cluster < bpb.ClusterCount + 2;
+
+        private uint GetTotalSectors(Bpb bpb)
+            => bpb.TotalSectors16 != 0 ? bpb.TotalSectors16 : bpb.TotalSectors32;
+
+        private uint GetRootDirSizeSectors(Bpb bpb)
+            => ((bpb.RootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector;
+
+        private uint GetRootDirStartSector(Bpb bpb)
+            => _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
+
+        private uint GetDataStartSector(Bpb bpb)
+            => GetRootDirStartSector(bpb) + GetRootDirSizeSectors(bpb);
+
+        private DirectoryLocation GetRootDirectory(Bpb bpb)
+            => new(GetRootDirStartSector(bpb), (int)GetRootDirSizeSectors(bpb), 0);
+
+        private DirectoryLocation GetSubdirectoryLocation(uint firstCluster, Bpb bpb)
+            => new(ClusterToSector(firstCluster, bpb), bpb.SectorsPerCluster, firstCluster);
 
         private Bpb ParseBpb(ReadOnlySpan<byte> bootSector)
         {
@@ -290,12 +332,64 @@ namespace NetImage.Workers
                 TotalSectors32 = BitConverter.ToUInt32(bootSector.Slice(32, 4))
             };
 
-            bpb.SectorsPerFat = bpb.SectorsPerFat16 == 0 ? bpb.TotalSectors32 : (uint)bpb.SectorsPerFat16;
+            bpb.SectorsPerFat = bpb.SectorsPerFat16 != 0
+                ? bpb.SectorsPerFat16
+                : BitConverter.ToUInt32(bootSector.Slice(36, 4));
+
+            var totalSectors = GetTotalSectors(bpb);
+            var rootDirSizeSectors = GetRootDirSizeSectors(bpb);
+            var dataAreaStart = bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat) + rootDirSizeSectors;
+            var dataSectors = totalSectors > dataAreaStart ? totalSectors - dataAreaStart : 0;
+            bpb.ClusterCount = bpb.SectorsPerCluster == 0 ? 0 : dataSectors / bpb.SectorsPerCluster;
 
             return bpb;
         }
 
-        private void ReadDirectoryEntries(uint startSector, int numSectors, string parentPath, Bpb bpb)
+        private IEnumerable<uint> EnumerateClusterChain(uint firstCluster, Bpb bpb)
+        {
+            if (!IsDataCluster(firstCluster, bpb))
+                yield break;
+
+            var currentCluster = firstCluster;
+            var visited = new HashSet<uint>();
+
+            while (IsDataCluster(currentCluster, bpb))
+            {
+                if (!visited.Add(currentCluster))
+                {
+                    System.Diagnostics.Debug.WriteLine($"Cycle detected at cluster {currentCluster}");
+                    yield break;
+                }
+
+                yield return currentCluster;
+
+                var nextCluster = GetNextCluster(currentCluster, bpb);
+                if (nextCluster == 0 || IsEndOfChain(nextCluster, bpb))
+                    yield break;
+
+                currentCluster = nextCluster;
+            }
+        }
+
+        private IEnumerable<int> EnumerateDirectoryEntryOffsets(DirectoryLocation directory, Bpb bpb)
+        {
+            if (directory.FirstCluster == 0)
+            {
+                foreach (var offset in EnumerateDirectoryEntryOffsets(directory.StartSector, directory.NumSectors, bpb))
+                    yield return offset;
+
+                yield break;
+            }
+
+            foreach (var cluster in EnumerateClusterChain(directory.FirstCluster, bpb))
+            {
+                var startSector = ClusterToSector(cluster, bpb);
+                foreach (var offset in EnumerateDirectoryEntryOffsets(startSector, bpb.SectorsPerCluster, bpb))
+                    yield return offset;
+            }
+        }
+
+        private IEnumerable<int> EnumerateDirectoryEntryOffsets(uint startSector, int numSectors, Bpb bpb)
         {
             var imageData = _imageData!;
             var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
@@ -305,27 +399,51 @@ namespace NetImage.Workers
                 var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
 
                 if (offset + 32 > imageData.Length)
-                    break;
+                    yield break;
 
+                yield return offset;
+            }
+        }
+
+        private bool TryResolveDirectory(string path, Bpb bpb, out DirectoryLocation directory)
+        {
+            directory = GetRootDirectory(bpb);
+
+            if (string.IsNullOrEmpty(path))
+                return true;
+
+            foreach (var part in path.Split('\\', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var dirCluster = FindDirectoryCluster(directory, part, bpb);
+                if (dirCluster == 0)
+                    return false;
+
+                directory = GetSubdirectoryLocation(dirCluster, bpb);
+            }
+
+            return true;
+        }
+
+        private void ReadDirectoryEntries(DirectoryLocation directory, string parentPath, Bpb bpb)
+        {
+            var imageData = _imageData!;
+
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
+            {
                 var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
                 var firstByte = entry[0];
 
-                // Skip empty entries
                 if (firstByte == 0x00)
-                    continue;
+                    break;
 
-                // Skip deleted entries (0xE5) and alternate name entries (0x05-0x0A, 0xE5-0xEA)
                 if (firstByte == 0xE5 || (firstByte >= 0x05 && firstByte <= 0x0A) || (firstByte >= 0xE5 && firstByte <= 0xEA))
                     continue;
 
-                var name = DecodeEntryName(entry);
-
-                // Skip volume label entries (attribute byte = 0x08)
                 const byte ATTR_VOLUME_LABEL = 0x08;
                 if ((entry[11] & ATTR_VOLUME_LABEL) != 0)
                     continue;
 
-                // Skip special entries (., ..)
+                var name = DecodeEntryName(entry);
                 if (name == "." || name == "..")
                     continue;
 
@@ -335,49 +453,15 @@ namespace NetImage.Workers
                 var modified = ParseFatDateTime(BitConverter.ToUInt16(entry.Slice(24, 2)), BitConverter.ToUInt16(entry.Slice(22, 2)));
                 FilesAndFolders.Add(new FileEntry(fullPath, fileSize, modified));
 
-                // Recursively traverse subdirectories
                 if (isDir)
                 {
                     var firstCluster = GetFirstCluster(entry);
-                    System.Diagnostics.Debug.WriteLine($"Found directory: {fullPath}, firstCluster={firstCluster}");
-                    ReadDirectoryEntriesFromClusterChain(firstCluster, fullPath, bpb);
+                    if (IsDataCluster(firstCluster, bpb))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Found directory: {fullPath}, firstCluster={firstCluster}");
+                        ReadDirectoryEntries(GetSubdirectoryLocation(firstCluster, bpb), fullPath, bpb);
+                    }
                 }
-            }
-        }
-
-        private void ReadDirectoryEntriesFromClusterChain(uint firstCluster, string parentPath, Bpb bpb)
-        {
-            if (firstCluster < 2)
-                return;
-
-            System.Diagnostics.Debug.WriteLine($"ReadDirectoryEntriesFromClusterChain: firstCluster={firstCluster}, path={parentPath}");
-
-            var currentCluster = firstCluster;
-            var visited = new HashSet<uint>();
-            int iteration = 0;
-
-            while (currentCluster >= 2 && currentCluster < 0xFF8)
-            {
-                iteration++;
-                if (iteration > 1000)
-                {
-                    System.Diagnostics.Debug.WriteLine($"WARNING: Iteration limit exceeded in cluster chain for path={parentPath}");
-                    break;
-                }
-
-                if (!visited.Add(currentCluster))
-                {
-                    System.Diagnostics.Debug.WriteLine($"Cycle detected at cluster {currentCluster} for path={parentPath}");
-                    break; // Cycle guard
-                }
-
-                var dirStartSector = ClusterToSector(currentCluster, bpb);
-                System.Diagnostics.Debug.WriteLine($"  Iteration {iteration}: cluster={currentCluster}, sector={dirStartSector}");
-
-                ReadDirectoryEntries(dirStartSector, bpb.SectorsPerCluster, parentPath, bpb);
-
-                currentCluster = GetNextCluster(currentCluster, bpb);
-                System.Diagnostics.Debug.WriteLine($"  Next cluster: {currentCluster}");
             }
         }
 
@@ -452,8 +536,7 @@ namespace NetImage.Workers
 
             // Calculate the sector where the cluster starts
             // Data area starts after root directory
-            var dataStartSector = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat) +
-                                  ((bpb.RootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector;
+            var dataStartSector = GetDataStartSector(bpb);
 
             var sectorsPerCluster = bpb.SectorsPerCluster;
             var clusterOffset = (cluster - 2) * sectorsPerCluster;
@@ -523,53 +606,23 @@ namespace NetImage.Workers
             var targetDirectory = lastSlash >= 0 ? path.Substring(0, lastSlash) : string.Empty;
             var name = lastSlash >= 0 ? path.Substring(lastSlash + 1) : path;
 
-            var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
-            var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
-            var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
+            if (!TryResolveDirectory(targetDirectory, bpb, out var directory))
+                return null;
 
-            uint currentDirSector = rootDirStart;
-            int currentDirSectors = rootDirSizeSectors;
-
-            if (!string.IsNullOrEmpty(targetDirectory))
-            {
-                var parts = targetDirectory.Split('\\', StringSplitOptions.RemoveEmptyEntries);
-                bool resolvedFromClusterChain = false;
-
-                foreach (var part in parts)
-                {
-                    var dirCluster = FindDirectoryCluster(currentDirSector, currentDirSectors, part, resolvedFromClusterChain, bpb);
-                    if (dirCluster == 0)
-                        return null;
-
-                    currentDirSector = ClusterToSector(dirCluster, bpb);
-                    currentDirSectors = bpb.SectorsPerCluster;
-                    resolvedFromClusterChain = true;
-                }
-            }
-
-            return ReadFileContent(currentDirSector, currentDirSectors, name, bpb);
+            return ReadFileContent(directory, name, bpb);
         }
 
-        private byte[]? ReadFileContent(uint startSector, int numSectors, string fileName, Bpb bpb)
+        private byte[]? ReadFileContent(DirectoryLocation directory, string fileName, Bpb bpb)
         {
             var imageData = _imageData!;
-            var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
 
-            for (int i = 0; i < entryCount; i++)
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
             {
-                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
-
-                if (offset + 32 > imageData.Length)
-                    break;
-
                 var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
                 var firstByte = entry[0];
-
-                // Skip empty entries
                 if (firstByte == 0x00)
-                    continue;
+                    break;
 
-                // Skip deleted entries
                 if (firstByte == 0xE5 || (firstByte >= 0x05 && firstByte <= 0x0A) || (firstByte >= 0xE5 && firstByte <= 0xEA))
                     continue;
 
@@ -604,11 +657,10 @@ namespace NetImage.Workers
         private byte[] ReadFileFromCluster(uint firstCluster, uint fileSize, Bpb bpb)
         {
             var result = new List<byte>();
-            var currentCluster = firstCluster;
 
-            while (result.Count < fileSize)
+            foreach (var cluster in EnumerateClusterChain(firstCluster, bpb))
             {
-                var sector = ClusterToSector(currentCluster, bpb);
+                var sector = ClusterToSector(cluster, bpb);
                 var sectorStart = (int)(sector * bpb.BytesPerSector);
 
                 if (sectorStart + bpb.BytesPerSector > _imageData!.Length)
@@ -627,9 +679,7 @@ namespace NetImage.Workers
                     }
                 }
 
-                // Get next cluster from FAT
-                currentCluster = GetNextCluster(currentCluster, bpb);
-                if (currentCluster == 0 || currentCluster >= 0xFF8) // End of chain
+                if (result.Count >= fileSize)
                     break;
             }
 
@@ -648,13 +698,10 @@ namespace NetImage.Workers
             long freeBytes = 0;
 
             // Count free FAT entries (cluster 2 onwards)
-            var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
-            var fatOffset = (int)(fatStartSector * bpb.BytesPerSector);
-            var totalClusters = IsFat12(bpb)
-                ? (bpb.TotalSectors16 > 0 ? bpb.TotalSectors16 : bpb.TotalSectors32) / bpb.SectorsPerCluster
-                : (bpb.TotalSectors16 > 0 ? bpb.TotalSectors16 : bpb.TotalSectors32) / bpb.SectorsPerCluster;
+            // FAT starts at: partition byte offset + (reserved sectors * bytes per sector)
+            var fatOffset = (int)(partitionByteOffset + bpb.ReservedSectors * bpb.BytesPerSector);
 
-            for (uint cluster = 2; cluster < totalClusters; cluster++)
+            for (uint cluster = 2; cluster < bpb.ClusterCount + 2; cluster++)
             {
                 if (GetFatEntry(cluster, bpb) == 0)
                     freeBytes += clusterSize;
@@ -692,48 +739,20 @@ namespace NetImage.Workers
             var clusterBytes = new byte[bpb.BytesPerSector * bpb.SectorsPerCluster];
             WriteFileToCluster(firstCluster, clusterBytes, bpb);
 
-            uint currentDirSector;
-            int currentDirSectors;
             uint parentCluster = 0; // Root is cluster 0 for '.' and '..'
-            
-            var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
-            var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
-            var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
+            if (!TryResolveDirectory(targetDirectory, bpb, out var currentDirectory))
+                throw new InvalidOperationException($"Directory '{targetDirectory}' not found on the disk image.");
 
-            if (string.IsNullOrEmpty(targetDirectory))
-            {
-                currentDirSector = rootDirStart;
-                currentDirSectors = rootDirSizeSectors;
-                parentCluster = 0;
-            }
-            else
-            {
-                var parts = targetDirectory.Split('\\', StringSplitOptions.RemoveEmptyEntries);
-                bool resolvedFromClusterChain = false;
-
-                currentDirSector = rootDirStart;
-                currentDirSectors = rootDirSizeSectors;
-
-                foreach (var part in parts)
-                {
-                    var dirCluster = FindDirectoryCluster(currentDirSector, currentDirSectors, part, resolvedFromClusterChain, bpb);
-                    if (dirCluster == 0)
-                        throw new InvalidOperationException($"Directory '{part}' not found on the disk image.");
-
-                    parentCluster = dirCluster;
-                    currentDirSector = ClusterToSector(dirCluster, bpb);
-                    currentDirSectors = bpb.SectorsPerCluster;
-                    resolvedFromClusterChain = true;
-                }
-            }
+            if (currentDirectory.FirstCluster != 0)
+                parentCluster = currentDirectory.FirstCluster;
 
             // Write 'this' and 'parent' directory entries into the new folder
-            var newFolderSector = ClusterToSector(firstCluster, bpb);
-            CreateDirectoryEntry(newFolderSector, bpb.SectorsPerCluster, ".          ", 0, firstCluster, true, bpb);
-            CreateDirectoryEntry(newFolderSector, bpb.SectorsPerCluster, "..         ", 0, parentCluster, true, bpb);
+            var newFolderDirectory = GetSubdirectoryLocation(firstCluster, bpb);
+            CreateDirectoryEntry(newFolderDirectory, ".          ", 0, firstCluster, true, bpb);
+            CreateDirectoryEntry(newFolderDirectory, "..         ", 0, parentCluster, true, bpb);
 
             // Create the directory entry in the parent directory
-            CreateDirectoryEntry(currentDirSector, currentDirSectors, encodedName, 0, firstCluster, true, bpb);
+            CreateDirectoryEntry(currentDirectory, encodedName, 0, firstCluster, true, bpb);
 
         }
 
@@ -770,42 +789,10 @@ namespace NetImage.Workers
             // Write file content to allocated clusters
             WriteFileToCluster(firstCluster, content, bpb);
 
-            if (string.IsNullOrEmpty(targetDirectory))
-            {
-                // Root directory
-                var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
-                var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
-                var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
-                CreateDirectoryEntry(rootDirStart, rootDirSizeSectors, encodedName, (uint)content.Length, firstCluster, false, bpb);
-            }
-            else
-            {
-                // Resolve subdirectory by walking the path components
-                var parts = targetDirectory.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+            if (!TryResolveDirectory(targetDirectory, bpb, out var currentDirectory))
+                throw new InvalidOperationException($"Directory '{targetDirectory}' not found on the disk image.");
 
-                // Start search from the root directory
-                var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
-                var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
-                var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
-
-                uint currentDirSector = rootDirStart;
-                int currentDirSectors = rootDirSizeSectors;
-                bool resolvedFromClusterChain = false;
-
-                foreach (var part in parts)
-                {
-                    var dirCluster = FindDirectoryCluster(currentDirSector, currentDirSectors, part, resolvedFromClusterChain, bpb);
-                    if (dirCluster == 0)
-                        throw new InvalidOperationException($"Directory '{part}' not found on the disk image.");
-
-                    currentDirSector = ClusterToSector(dirCluster, bpb);
-                    currentDirSectors = bpb.SectorsPerCluster;
-                    resolvedFromClusterChain = true;
-                }
-
-                // Create the directory entry in the parent directory
-                CreateDirectoryEntry(currentDirSector, currentDirSectors, encodedName, (uint)content.Length, firstCluster, false, bpb);
-            }
+            CreateDirectoryEntry(currentDirectory, encodedName, (uint)content.Length, firstCluster, false, bpb);
         }
 
         public void AddHostDirectory(string targetDirectory, string hostFolderPath)
@@ -841,23 +828,19 @@ namespace NetImage.Workers
         /// Searches a directory region for a subdirectory with the given name and returns its first cluster.
         /// Returns 0 if not found.
         /// </summary>
-        private uint FindDirectoryCluster(uint startSector, int numSectors, string name, bool fromClusterChain, Bpb bpb)
+        private uint FindDirectoryCluster(DirectoryLocation directory, string name, Bpb bpb)
         {
             var imageData = _imageData!;
-            var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
 
-            for (int i = 0; i < entryCount; i++)
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
             {
-                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
-
-                if (offset + 32 > imageData.Length)
-                    break;
-
                 var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
                 var firstByte = entry[0];
+                if (firstByte == 0x00)
+                    break;
 
-                if (firstByte == 0x00) continue;
-                if (firstByte == 0xE5) continue;
+                if (firstByte == 0xE5 || (firstByte >= 0x05 && firstByte <= 0x0A) || (firstByte >= 0xE5 && firstByte <= 0xEA))
+                    continue;
 
                 var entryName = DecodeEntryName(entry);
                 if (entryName == "." || entryName == "..") continue;
@@ -922,28 +905,21 @@ namespace NetImage.Workers
             }
 
             // Mark last cluster as end of chain
-            SetFatEntry(currentCluster, 0xFFF, bpb);
+            SetFatEntry(currentCluster, GetEndOfChainMarker(bpb), bpb);
 
             return firstCluster;
         }
 
         private uint FindFreeCluster(Bpb bpb)
         {
-            var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
-            var fatOffset = (int)(fatStartSector * bpb.BytesPerSector);
-
             // Start from cluster 2
-            for (uint cluster = 2; ; cluster++)
+            for (uint cluster = 2; cluster < bpb.ClusterCount + 2; cluster++)
             {
                 var entryValue = GetFatEntry(cluster, bpb);
 
                 // Check if cluster is free (entry value is 0)
                 if (entryValue == 0)
                     return cluster;
-
-                // Check for end of valid cluster range
-                if (entryValue >= 0xFF8 && cluster > 10000)
-                    break;
             }
 
             return 0;
@@ -961,7 +937,7 @@ namespace NetImage.Workers
                 var fatEntryStart = fatOffset + entryOffset;
 
                 if (fatEntryStart + 2 > _imageData!.Length)
-                    return 0xFFF;
+                    return GetEndOfChainMarker(bpb);
 
                 var fatValue = (ushort)(_imageData[fatEntryStart] | (_imageData[fatEntryStart + 1] << 8));
 
@@ -979,7 +955,7 @@ namespace NetImage.Workers
                 var fatEntryStart = fatOffset + entryOffset;
 
                 if (fatEntryStart + 2 > _imageData!.Length)
-                    return 0xFFFF;
+                    return GetEndOfChainMarker(bpb);
 
                 return BitConverter.ToUInt16(_imageData.AsSpan(fatEntryStart, 2));
             }
@@ -1034,12 +1010,11 @@ namespace NetImage.Workers
 
         private void WriteFileToCluster(uint firstCluster, byte[] content, Bpb bpb)
         {
-            var currentCluster = firstCluster;
             var offset = 0;
 
-            while (offset < content.Length)
+            foreach (var cluster in EnumerateClusterChain(firstCluster, bpb))
             {
-                var sector = ClusterToSector(currentCluster, bpb);
+                var sector = ClusterToSector(cluster, bpb);
                 var sectorStart = (int)(sector * bpb.BytesPerSector);
 
                 var sectorsPerCluster = bpb.SectorsPerCluster;
@@ -1055,25 +1030,17 @@ namespace NetImage.Workers
                     }
                 }
 
-                // Get next cluster from FAT
-                currentCluster = GetFatEntry(currentCluster, bpb);
-                if (currentCluster >= 0xFF8)
+                if (offset >= content.Length)
                     break;
             }
         }
 
-        private void CreateDirectoryEntry(uint startSector, int numSectors, string fileName, uint fileSize, uint firstCluster, bool isDirectory, Bpb bpb)
+        private void CreateDirectoryEntry(DirectoryLocation directory, string fileName, uint fileSize, uint firstCluster, bool isDirectory, Bpb bpb)
         {
             var imageData = _imageData!;
-            var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
 
-            for (int i = 0; i < entryCount; i++)
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
             {
-                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
-
-                if (offset + 32 > imageData.Length)
-                    break;
-
                 var entry = imageData.AsSpan(offset, 32);
                 var firstByte = entry[0];
 
@@ -1139,63 +1106,34 @@ namespace NetImage.Workers
             var targetDirectory = lastSlash >= 0 ? path.Substring(0, lastSlash) : string.Empty;
             var name = lastSlash >= 0 ? path.Substring(lastSlash + 1) : path;
 
-            var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
-            var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
-            var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
+            if (!TryResolveDirectory(targetDirectory, bpb, out var currentDirectory))
+                throw new FileNotFoundException($"Directory '{targetDirectory}' not found on the disk image.");
 
-            uint currentDirSector = rootDirStart;
-            int currentDirSectors = rootDirSizeSectors;
-
-            if (!string.IsNullOrEmpty(targetDirectory))
-            {
-                var parts = targetDirectory.Split('\\', StringSplitOptions.RemoveEmptyEntries);
-                bool resolvedFromClusterChain = false;
-
-                foreach (var part in parts)
-                {
-                    var dirCluster = FindDirectoryCluster(currentDirSector, currentDirSectors, part, resolvedFromClusterChain, bpb);
-                    if (dirCluster == 0)
-                        throw new FileNotFoundException($"Directory '{part}' not found on the disk image.");
-
-                    currentDirSector = ClusterToSector(dirCluster, bpb);
-                    currentDirSectors = bpb.SectorsPerCluster;
-                    resolvedFromClusterChain = true;
-                }
-            }
-
-            DeleteEntryInternal(currentDirSector, currentDirSectors, name, bpb);
+            DeleteEntryInternal(currentDirectory, name, bpb);
 
             ParseFatFilesystem();
         }
 
-        private void DeleteEntryInternal(uint startSector, int numSectors, string name, Bpb bpb)
+        private void DeleteEntryInternal(DirectoryLocation directory, string name, Bpb bpb)
         {
             var imageData = _imageData!;
-            var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
 
-            System.Diagnostics.Debug.WriteLine($"DeleteEntryInternal: looking for '{name}' in sector {startSector}, {entryCount} entries");
+            System.Diagnostics.Debug.WriteLine($"DeleteEntryInternal: looking for '{name}' in directory starting at sector {directory.StartSector}");
 
-            for (int i = 0; i < entryCount; i++)
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
             {
-                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
-
-                if (offset + 32 > imageData.Length)
-                    break;
-
                 var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
                 var firstByte = entry[0];
 
-                // Skip empty entries
                 if (firstByte == 0x00)
-                    continue;
+                    break;
 
-                // Skip already deleted entries
                 if (firstByte == 0xE5)
                     continue;
 
                 var entryName = DecodeEntryName(entry);
 
-                System.Diagnostics.Debug.WriteLine($"  Entry {i}: '{entryName}' (firstByte=0x{firstByte:X2}, attr=0x{entry[11]:X2})");
+                System.Diagnostics.Debug.WriteLine($"  Entry '{entryName}' (firstByte=0x{firstByte:X2}, attr=0x{entry[11]:X2})");
 
                 // Skip volume label entries
                 if ((entry[11] & 0x08) != 0)
@@ -1259,13 +1197,13 @@ namespace NetImage.Workers
             }
 
             var availableEntries = new List<string>();
-            for (int i = 0; i < entryCount; i++)
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
             {
-                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
-                if (offset + 32 > imageData.Length) break;
                 var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
                 var firstByte = entry[0];
-                if (firstByte == 0x00 || firstByte == 0xE5) continue;
+                if (firstByte == 0x00)
+                    break;
+                if (firstByte == 0xE5) continue;
                 if ((entry[11] & 0x08) != 0) continue;
                 var entryName = DecodeEntryName(entry);
                 if (entryName != "." && entryName != "..")
@@ -1276,16 +1214,12 @@ namespace NetImage.Workers
 
         private void FreeClusterChain(uint firstCluster, Bpb bpb)
         {
-            if (firstCluster == 0 || firstCluster >= 0xFF8)
+            if (!IsDataCluster(firstCluster, bpb))
                 return;
 
-            var currentCluster = firstCluster;
-
-            while (currentCluster < 0xFF8)
+            foreach (var cluster in EnumerateClusterChain(firstCluster, bpb).ToList())
             {
-                var nextCluster = GetFatEntry(currentCluster, bpb);
-                SetFatEntry(currentCluster, 0, bpb); // Mark as free
-                currentCluster = nextCluster;
+                SetFatEntry(cluster, 0, bpb);
             }
         }
 
@@ -1342,6 +1276,20 @@ namespace NetImage.Workers
             }
         }
 
+        private enum FatType
+        {
+            Fat12,
+            Fat16,
+            Fat32
+        }
+
+        private readonly struct DirectoryLocation(uint startSector, int numSectors, uint firstCluster)
+        {
+            public uint StartSector { get; } = startSector;
+            public int NumSectors { get; } = numSectors;
+            public uint FirstCluster { get; } = firstCluster;
+        }
+
         private struct Bpb
         {
             public uint BytesPerSector { get; set; }
@@ -1357,6 +1305,7 @@ namespace NetImage.Workers
             public uint HiddenSectors { get; set; }
             public uint TotalSectors32 { get; set; }
             public uint SectorsPerFat { get; set; }
+            public uint ClusterCount { get; set; }
         }
     }
 }
