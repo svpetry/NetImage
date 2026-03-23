@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:NetImage.Views"
         xmlns:vm="clr-namespace:NetImage.ViewModels"
-        Title="NetImage" Height="450" Width="800"
+        Title="NetImage" Height="450" Width="840" MinWidth="600" MinHeight="300"
         Icon="/diskette.png">
     <Window.DataContext>
         <vm:MainViewModel/>
@@ -130,7 +130,7 @@
                     </Style>
                 </ListView.ItemContainerStyle>
                 <ListView.View>
-                    <GridView>
+                    <GridView AllowsColumnReorder="False">
                         <GridViewColumn Width="32">
                             <GridViewColumn.CellTemplate>
                                 <DataTemplate>
@@ -148,9 +148,20 @@
                                 </DataTemplate>
                             </GridViewColumn.CellTemplate>
                         </GridViewColumn>
-                        <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}" Width="250"/>
-                        <GridViewColumn Header="Date modified" DisplayMemberBinding="{Binding FormattedModified}" Width="150"/>
-                        <GridViewColumn Header="Size" Width="100">
+                        <GridViewColumn DisplayMemberBinding="{Binding Name}" Width="250">
+                            <GridViewColumn.Header>
+                                <TextBlock Text="Name" MouseLeftButtonUp="GridViewHeader_MouseLeftButtonUp" Tag="Name" Cursor="Hand"/>
+                            </GridViewColumn.Header>
+                        </GridViewColumn>
+                        <GridViewColumn DisplayMemberBinding="{Binding FormattedModified}" Width="150">
+                            <GridViewColumn.Header>
+                                <TextBlock Text="Date modified" MouseLeftButtonUp="GridViewHeader_MouseLeftButtonUp" Tag="Date" Cursor="Hand"/>
+                            </GridViewColumn.Header>
+                        </GridViewColumn>
+                        <GridViewColumn Width="100">
+                            <GridViewColumn.Header>
+                                <TextBlock Text="Size" MouseLeftButtonUp="GridViewHeader_MouseLeftButtonUp" Tag="Size" Cursor="Hand"/>
+                            </GridViewColumn.Header>
                             <GridViewColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding FormattedSize}" TextAlignment="Right" HorizontalAlignment="Right" />

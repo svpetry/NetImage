@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace NetImage.Workers
@@ -11,6 +12,7 @@ namespace NetImage.Workers
     {
         private byte[]? _imageData;
         private bool _isLoaded;
+        private uint _partitionStartSector;
 
         public event EventHandler? LoadingStarted;
         public event EventHandler? LoadingCompleted;
@@ -68,17 +70,46 @@ namespace NetImage.Workers
 
             var bootSector = new ReadOnlySpan<byte>(_imageData, 0, 512);
 
+            // Check if this is an MBR partition table (hard disk image)
+            _partitionStartSector = CheckForPartitionTable(bootSector);
+
+            System.Diagnostics.Debug.WriteLine($"Partition start sector: {_partitionStartSector}, byte offset: {_partitionStartSector * 512}");
+
+            // If partition found, read boot sector from partition start
+            if (_partitionStartSector > 0)
+            {
+                var partitionByteOffset = _partitionStartSector * 512;
+                if (partitionByteOffset + 512 > _imageData.Length)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Partition offset out of bounds: {partitionByteOffset} + 512 > {_imageData.Length}");
+                    return;
+                }
+                bootSector = new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512);
+                System.Diagnostics.Debug.WriteLine($"Read boot sector from partition at sector {_partitionStartSector} (byte offset {partitionByteOffset})");
+            }
+
             if (!IsFatBootSector(bootSector))
             {
+                System.Diagnostics.Debug.WriteLine($"FAT boot sector check failed at sector {_partitionStartSector}");
+                System.Diagnostics.Debug.WriteLine($"First 16 bytes: [{string.Join(" ", bootSector.Slice(0, 16).ToArray().Select(b => b.ToString("X2")))}]");
+                System.Diagnostics.Debug.WriteLine($"Bytes 11-15 (BPB area): [{string.Join(" ", bootSector.Slice(11, 5).ToArray().Select(b => b.ToString("X2")))}]");
+                System.Diagnostics.Debug.WriteLine($"Signature bytes 510-511: {bootSector[510]:X2} {bootSector[511]:X2}");
                 return;
             }
 
+            System.Diagnostics.Debug.WriteLine($"FAT boot sector found at sector {_partitionStartSector}");
+
             var bpb = ParseBpb(bootSector);
 
-            var rootDirStart = bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
+            System.Diagnostics.Debug.WriteLine($"BPB: BytesPerSector={bpb.BytesPerSector}, SectorsPerCluster={bpb.SectorsPerCluster}, ReservedSectors={bpb.ReservedSectors}, NumFats={bpb.NumFats}, RootDirEntries={bpb.RootDirEntries}, TotalSectors16={bpb.TotalSectors16}, TotalSectors32={bpb.TotalSectors32}, SectorsPerFat16={bpb.SectorsPerFat16}, SectorsPerFat={bpb.SectorsPerFat}");
+
+            // Adjust root directory start based on partition offset (in sectors)
+            var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
 
             var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
             var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
+
+            System.Diagnostics.Debug.WriteLine($"Root directory: startSector={rootDirStart}, sizeSectors={rootDirSizeSectors}, entries={rootDirEntries}");
 
             ExtractVolumeLabel(rootDirStart, rootDirSizeSectors, bpb);
 
@@ -88,6 +119,81 @@ namespace NetImage.Workers
             }
 
             ReadDirectoryEntries(rootDirStart, rootDirSizeSectors, string.Empty, bpb);
+        }
+
+        /// <summary>
+        /// Checks if the boot sector is an MBR partition table and returns the offset of the first FAT partition.
+        /// Returns 0 if no partition table is found (image is a raw filesystem).
+        /// </summary>
+        private uint CheckForPartitionTable(ReadOnlySpan<byte> sector)
+        {
+            if (sector.Length < 512)
+                return 0;
+
+            // MBR signature at end
+            if (sector[510] != 0x55 || sector[511] != 0xAA)
+            {
+                System.Diagnostics.Debug.WriteLine($"MBR signature check failed: {sector[510]:X2} {sector[511]:X2}");
+                return 0;
+            }
+
+            System.Diagnostics.Debug.WriteLine("MBR signature found, checking partition table...");
+
+            // Check if this looks like a FAT BPB (boot sector) rather than MBR
+            // FAT boot sectors have a jump instruction at offset 0 (0xEB) followed by BPB fields
+            // MBR has boot code at the start, and partition table at offset 446
+            //
+            // Key difference: FAT BPB has bytes/sector at offset 11 that is a power of 2 (512, 1024, etc.)
+            // and sectors/cluster at offset 13 (1, 2, 4, 8, 16, 32, 64)
+            // MBR doesn't have these meaningful values
+            var bytesPerSector = BitConverter.ToUInt16(sector.Slice(11, 2));
+            var sectorsPerCluster = sector[13];
+            var reservedSectors = BitConverter.ToUInt16(sector.Slice(14, 2));
+
+            System.Diagnostics.Debug.WriteLine($"BPB check: bytesPerSector={bytesPerSector}, sectorsPerCluster={sectorsPerCluster}, reservedSectors={reservedSectors}");
+
+            // Check if this looks like a valid FAT BPB
+            bool looksLikeFatBpb = (bytesPerSector == 512 || bytesPerSector == 1024 || bytesPerSector == 2048 || bytesPerSector == 4096) &&
+                                   (sectorsPerCluster == 1 || sectorsPerCluster == 2 || sectorsPerCluster == 4 ||
+                                    sectorsPerCluster == 8 || sectorsPerCluster == 16 || sectorsPerCluster == 32 || sectorsPerCluster == 64) &&
+                                   reservedSectors <= 32;
+
+            if (looksLikeFatBpb)
+            {
+                System.Diagnostics.Debug.WriteLine("Looks like raw FAT BPB, not MBR");
+                // This looks like a raw FAT filesystem, not an MBR
+                return 0;
+            }
+
+            System.Diagnostics.Debug.WriteLine("Not a FAT BPB, checking partition table...");
+
+            // Check partition table at offset 446
+            // Look for any partition with a FAT type
+            for (int i = 0; i < 4; i++)
+            {
+                var offset = 446 + (i * 16);
+                var bootIndicator = sector[offset];
+                var partitionType = sector[offset + 4];
+                var startSector = BitConverter.ToUInt32(sector.Slice(offset + 8, 4));
+                var sectorCount = BitConverter.ToUInt32(sector.Slice(offset + 12, 4));
+
+                // Debug: print raw bytes of partition entry
+                var entryBytes = string.Join(" ", sector.Slice(offset, 16).ToArray().Select(b => b.ToString("X2")));
+                System.Diagnostics.Debug.WriteLine($"Partition {i}: boot={bootIndicator:X2}, type={partitionType:X2}, start={startSector}, count={sectorCount}, raw=[{entryBytes}]");
+
+                // FAT partition types: 0x01, 0x04, 0x06 (FAT12/16), 0x0B, 0x0C (FAT32), 0x0E, 0x0F (large FAT12/16), 0x14, 0x16
+                if (partitionType == 0x01 || partitionType == 0x04 || partitionType == 0x06 ||
+                    partitionType == 0x0B || partitionType == 0x0C || partitionType == 0x0E ||
+                    partitionType == 0x0F || partitionType == 0x14 || partitionType == 0x16)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Found FAT partition type {partitionType:X2} at sector {startSector}");
+                    // Found a FAT partition, return its start sector
+                    return startSector;
+                }
+            }
+
+            System.Diagnostics.Debug.WriteLine("No FAT partition found");
+            return 0; // No FAT partition found
         }
 
         private void ExtractVolumeLabel(uint startSector, int numSectors, Bpb bpb)
@@ -124,15 +230,46 @@ namespace NetImage.Workers
 
         private bool IsFatBootSector(ReadOnlySpan<byte> sector)
         {
-            if (sector.Length < 510)
+            if (sector.Length < 512)
                 return false;
 
-            return sector[510] == 0x55 && sector[511] == 0xAA;
+            // Check MBR signature
+            if (sector[510] != 0x55 || sector[511] != 0xAA)
+                return false;
+
+            // Validate BPB fields to ensure this is actually a FAT boot sector
+            // and not just random data with 0x55AA at the end
+            var bytesPerSector = BitConverter.ToUInt16(sector.Slice(11, 2));
+            var sectorsPerCluster = sector[13];
+            var reservedSectors = BitConverter.ToUInt16(sector.Slice(14, 2));
+
+            // bytesPerSector must be a valid power of 2
+            if (bytesPerSector != 512 && bytesPerSector != 1024 && bytesPerSector != 2048 && bytesPerSector != 4096)
+                return false;
+
+            // sectorsPerCluster must be a valid power of 2
+            if (sectorsPerCluster != 1 && sectorsPerCluster != 2 && sectorsPerCluster != 4 &&
+                sectorsPerCluster != 8 && sectorsPerCluster != 16 && sectorsPerCluster != 32 && sectorsPerCluster != 64)
+                return false;
+
+            // reservedSectors should be reasonable (typically 1-32 for FAT12/16, up to 128 for FAT32)
+            if (reservedSectors == 0 || reservedSectors > 256)
+                return false;
+
+            return true;
         }
 
         private bool IsFat12(Bpb bpb)
         {
-            return bpb.TotalSectors16 <= 4085 || (bpb.TotalSectors32 > 0 && bpb.TotalSectors32 <= 4085);
+            // FAT12: TotalSectors16 <= 4085 (and TotalSectors16 != 0, since 0 means use TotalSectors32)
+            // FAT16: TotalSectors16 > 4085 OR (TotalSectors16 == 0 AND TotalSectors32 <= 65525)
+            // FAT32: TotalSectors32 > 65525
+            if (bpb.TotalSectors16 != 0)
+            {
+                return bpb.TotalSectors16 <= 4085;
+            }
+            // TotalSectors16 is 0, so use TotalSectors32
+            return bpb.TotalSectors32 <= 4085;
         }
 
         private Bpb ParseBpb(ReadOnlySpan<byte> bootSector)
@@ -202,6 +339,7 @@ namespace NetImage.Workers
                 if (isDir)
                 {
                     var firstCluster = GetFirstCluster(entry);
+                    System.Diagnostics.Debug.WriteLine($"Found directory: {fullPath}, firstCluster={firstCluster}");
                     ReadDirectoryEntriesFromClusterChain(firstCluster, fullPath, bpb);
                 }
             }
@@ -212,18 +350,34 @@ namespace NetImage.Workers
             if (firstCluster < 2)
                 return;
 
+            System.Diagnostics.Debug.WriteLine($"ReadDirectoryEntriesFromClusterChain: firstCluster={firstCluster}, path={parentPath}");
+
             var currentCluster = firstCluster;
             var visited = new HashSet<uint>();
+            int iteration = 0;
 
             while (currentCluster >= 2 && currentCluster < 0xFF8)
             {
+                iteration++;
+                if (iteration > 1000)
+                {
+                    System.Diagnostics.Debug.WriteLine($"WARNING: Iteration limit exceeded in cluster chain for path={parentPath}");
+                    break;
+                }
+
                 if (!visited.Add(currentCluster))
+                {
+                    System.Diagnostics.Debug.WriteLine($"Cycle detected at cluster {currentCluster} for path={parentPath}");
                     break; // Cycle guard
+                }
 
                 var dirStartSector = ClusterToSector(currentCluster, bpb);
+                System.Diagnostics.Debug.WriteLine($"  Iteration {iteration}: cluster={currentCluster}, sector={dirStartSector}");
+
                 ReadDirectoryEntries(dirStartSector, bpb.SectorsPerCluster, parentPath, bpb);
 
                 currentCluster = GetNextCluster(currentCluster, bpb);
+                System.Diagnostics.Debug.WriteLine($"  Next cluster: {currentCluster}");
             }
         }
 
@@ -298,7 +452,7 @@ namespace NetImage.Workers
 
             // Calculate the sector where the cluster starts
             // Data area starts after root directory
-            var dataStartSector = bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat) +
+            var dataStartSector = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat) +
                                   ((bpb.RootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector;
 
             var sectorsPerCluster = bpb.SectorsPerCluster;
@@ -358,7 +512,8 @@ namespace NetImage.Workers
             if (_imageData == null || !_isLoaded)
                 return null;
 
-            var bootSector = new ReadOnlySpan<byte>(_imageData, 0, 512);
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bootSector = new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512);
             if (!IsFatBootSector(bootSector))
                 return null;
 
@@ -368,7 +523,7 @@ namespace NetImage.Workers
             var targetDirectory = lastSlash >= 0 ? path.Substring(0, lastSlash) : string.Empty;
             var name = lastSlash >= 0 ? path.Substring(lastSlash + 1) : path;
 
-            var rootDirStart = bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
+            var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
             var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
             var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
 
@@ -487,18 +642,19 @@ namespace NetImage.Workers
             if (_imageData == null || !_isLoaded)
                 return 0;
 
-            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, 0, 512));
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512));
             long clusterSize = bpb.BytesPerSector * bpb.SectorsPerCluster;
             long freeBytes = 0;
 
             // Count free FAT entries (cluster 2 onwards)
-            var fatStartSector = bpb.ReservedSectors;
+            var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
             var fatOffset = (int)(fatStartSector * bpb.BytesPerSector);
             var totalClusters = IsFat12(bpb)
                 ? (bpb.TotalSectors16 > 0 ? bpb.TotalSectors16 : bpb.TotalSectors32) / bpb.SectorsPerCluster
                 : (bpb.TotalSectors16 > 0 ? bpb.TotalSectors16 : bpb.TotalSectors32) / bpb.SectorsPerCluster;
 
-            for (uint cluster = 2; cluster < cluster + totalClusters && cluster < 0xFF0; cluster++)
+            for (uint cluster = 2; cluster < totalClusters; cluster++)
             {
                 if (GetFatEntry(cluster, bpb) == 0)
                     freeBytes += clusterSize;
@@ -524,7 +680,8 @@ namespace NetImage.Workers
 
         private void CreateFolderInternal(string targetDirectory, string folderName)
         {
-            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData!, 0, 512));
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData!, (int)partitionByteOffset, 512));
 
             var encodedName = EncodeFileName(folderName);
             
@@ -539,7 +696,7 @@ namespace NetImage.Workers
             int currentDirSectors;
             uint parentCluster = 0; // Root is cluster 0 for '.' and '..'
             
-            var rootDirStart = bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
+            var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
             var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
             var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
 
@@ -553,7 +710,7 @@ namespace NetImage.Workers
             {
                 var parts = targetDirectory.Split('\\', StringSplitOptions.RemoveEmptyEntries);
                 bool resolvedFromClusterChain = false;
-                
+
                 currentDirSector = rootDirStart;
                 currentDirSectors = rootDirSizeSectors;
 
@@ -601,7 +758,8 @@ namespace NetImage.Workers
 
         private void AddFileInternal(string targetDirectory, string fileName, byte[] content)
         {
-            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData!, 0, 512));
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData!, (int)partitionByteOffset, 512));
 
             // Encode filename to 8.3 format
             var encodedName = EncodeFileName(fileName);
@@ -615,7 +773,7 @@ namespace NetImage.Workers
             if (string.IsNullOrEmpty(targetDirectory))
             {
                 // Root directory
-                var rootDirStart = bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
+                var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
                 var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
                 var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
                 CreateDirectoryEntry(rootDirStart, rootDirSizeSectors, encodedName, (uint)content.Length, firstCluster, false, bpb);
@@ -626,7 +784,7 @@ namespace NetImage.Workers
                 var parts = targetDirectory.Split('\\', StringSplitOptions.RemoveEmptyEntries);
 
                 // Start search from the root directory
-                var rootDirStart = bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
+                var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
                 var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
                 var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
 
@@ -771,7 +929,7 @@ namespace NetImage.Workers
 
         private uint FindFreeCluster(Bpb bpb)
         {
-            var fatStartSector = bpb.ReservedSectors;
+            var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
             var fatOffset = (int)(fatStartSector * bpb.BytesPerSector);
 
             // Start from cluster 2
@@ -793,7 +951,7 @@ namespace NetImage.Workers
 
         private uint GetFatEntry(uint cluster, Bpb bpb)
         {
-            var fatStartSector = bpb.ReservedSectors;
+            var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
             var fatOffset = (int)(fatStartSector * bpb.BytesPerSector);
 
             if (IsFat12(bpb))
@@ -829,7 +987,7 @@ namespace NetImage.Workers
 
         private void SetFatEntry(uint cluster, uint value, Bpb bpb)
         {
-            var fatStartSector = bpb.ReservedSectors;
+            var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
             var fatOffset = (int)(fatStartSector * bpb.BytesPerSector);
 
             if (IsFat12(bpb))
@@ -974,13 +1132,14 @@ namespace NetImage.Workers
             if (_imageData == null || !_isLoaded)
                 throw new InvalidOperationException("Image must be opened before deleting files.");
 
-            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, 0, 512));
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512));
 
             var lastSlash = path.LastIndexOf('\\');
             var targetDirectory = lastSlash >= 0 ? path.Substring(0, lastSlash) : string.Empty;
             var name = lastSlash >= 0 ? path.Substring(lastSlash + 1) : path;
 
-            var rootDirStart = bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
+            var rootDirStart = _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
             var rootDirEntries = bpb.RootDirEntries > 0 ? bpb.RootDirEntries : 0;
             var rootDirSizeSectors = (int)(((rootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector);
 
@@ -1014,6 +1173,8 @@ namespace NetImage.Workers
             var imageData = _imageData!;
             var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
 
+            System.Diagnostics.Debug.WriteLine($"DeleteEntryInternal: looking for '{name}' in sector {startSector}, {entryCount} entries");
+
             for (int i = 0; i < entryCount; i++)
             {
                 var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
@@ -1034,6 +1195,8 @@ namespace NetImage.Workers
 
                 var entryName = DecodeEntryName(entry);
 
+                System.Diagnostics.Debug.WriteLine($"  Entry {i}: '{entryName}' (firstByte=0x{firstByte:X2}, attr=0x{entry[11]:X2})");
+
                 // Skip volume label entries
                 if ((entry[11] & 0x08) != 0)
                     continue;
@@ -1043,7 +1206,9 @@ namespace NetImage.Workers
                     continue;
 
                 // Check if this is the entry we're looking for
-                if (entryName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                var matches = entryName.Equals(name, StringComparison.OrdinalIgnoreCase);
+                System.Diagnostics.Debug.WriteLine($"    Comparing '{entryName}' with '{name}' -> {matches}");
+                if (matches)
                 {
                     // Mark as deleted by setting first byte to 0xE5
                     imageData[offset] = 0xE5;
@@ -1063,9 +1228,9 @@ namespace NetImage.Workers
                         var dirSizeSectors = (int)((dirSizeBytes + bpb.BytesPerSector - 1) / bpb.BytesPerSector);
 
                         // Delete all entries in the subdirectory
-                        for (int j = 0; j < dirSizeSectors * 512 / 32; j++)
+                        for (int j = 0; j < dirSizeSectors * (int)bpb.BytesPerSector / 32; j++)
                         {
-                            var subOffset = (int)(dirStartSector * 512) + (j * 32);
+                            var subOffset = (int)(dirStartSector * bpb.BytesPerSector) + (j * 32);
                             if (subOffset + 32 <= imageData.Length)
                             {
                                 var subFirstByte = imageData[subOffset];
@@ -1093,7 +1258,20 @@ namespace NetImage.Workers
                 }
             }
 
-            throw new FileNotFoundException($"Entry '{name}' not found.");
+            var availableEntries = new List<string>();
+            for (int i = 0; i < entryCount; i++)
+            {
+                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
+                if (offset + 32 > imageData.Length) break;
+                var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
+                var firstByte = entry[0];
+                if (firstByte == 0x00 || firstByte == 0xE5) continue;
+                if ((entry[11] & 0x08) != 0) continue;
+                var entryName = DecodeEntryName(entry);
+                if (entryName != "." && entryName != "..")
+                    availableEntries.Add(entryName);
+            }
+            throw new FileNotFoundException($"Entry '{name}' not found. Available entries: [{string.Join(", ", availableEntries)}]");
         }
 
         private void FreeClusterChain(uint firstCluster, Bpb bpb)
@@ -1114,8 +1292,10 @@ namespace NetImage.Workers
         private uint GetNextCluster(uint currentCluster, Bpb bpb)
         {
             // Calculate FAT entry offset (FAT12 uses 1.5 bytes per entry, FAT16 uses 2 bytes)
-            var fatStartSector = bpb.ReservedSectors;
+            var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
             var fatOffset = (int)(fatStartSector * bpb.BytesPerSector);
+
+            System.Diagnostics.Debug.WriteLine($"    GetNextCluster: cluster={currentCluster}, fatStartSector={fatStartSector}, fatOffset={fatOffset}");
 
             // For FAT12: each entry is 1.5 bytes
             if (IsFat12(bpb))
@@ -1124,9 +1304,13 @@ namespace NetImage.Workers
                 var fatEntryStart = fatOffset + entryOffset;
 
                 if (fatEntryStart + 2 > _imageData!.Length)
+                {
+                    System.Diagnostics.Debug.WriteLine($"    FAT12: out of bounds, returning 0");
                     return 0;
+                }
 
                 var fatValue = (ushort)(_imageData[fatEntryStart] | (_imageData[fatEntryStart + 1] << 8));
+                System.Diagnostics.Debug.WriteLine($"    FAT12: entryOffset={entryOffset}, fatEntryStart={fatEntryStart}, rawValue=0x{fatValue:X4}");
 
                 if (currentCluster % 2 == 0)
                 {
@@ -1137,6 +1321,7 @@ namespace NetImage.Workers
                     fatValue >>= 4;
                 }
 
+                System.Diagnostics.Debug.WriteLine($"    FAT12: final value=0x{fatValue:X4}");
                 return (uint)fatValue;
             }
             else
@@ -1146,9 +1331,14 @@ namespace NetImage.Workers
                 var fatEntryStart = fatOffset + entryOffset;
 
                 if (fatEntryStart + 2 > _imageData!.Length)
+                {
+                    System.Diagnostics.Debug.WriteLine($"    FAT16: out of bounds, returning 0");
                     return 0;
+                }
 
-                return BitConverter.ToUInt16(_imageData.AsSpan(fatEntryStart, 2));
+                var fatValue = BitConverter.ToUInt16(_imageData.AsSpan(fatEntryStart, 2));
+                System.Diagnostics.Debug.WriteLine($"    FAT16: entryOffset={entryOffset}, fatEntryStart={fatEntryStart}, value=0x{fatValue:X4}");
+                return (uint)fatValue;
             }
         }
 

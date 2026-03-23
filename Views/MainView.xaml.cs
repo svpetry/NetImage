@@ -1,5 +1,10 @@
+using System;
+using System.Collections;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Input;
 using NetImage.Models;
 using NetImage.ViewModels;
 
@@ -10,6 +15,9 @@ namespace NetImage.Views
     /// </summary>
     public partial class MainView : Window
     {
+        private string? _currentSortProp;
+        private ListSortDirection _currentSortDirection = ListSortDirection.Ascending;
+
         public MainView()
         {
             InitializeComponent();
@@ -126,7 +134,38 @@ namespace NetImage.Views
             MessageBox.Show(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
 
-        private static void OnTreeViewItemLoaded(object sender, RoutedEventArgs e)
+        private void GridViewHeader_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+{
+    if (sender is TextBlock header && header.Tag is string sortProp)
+    {
+        var list = MainListView.ItemsSource as IList;
+        if (list == null) return;
+
+        // Toggle direction if same column, otherwise default to ascending
+        if (_currentSortProp == sortProp)
+        {
+            _currentSortDirection = _currentSortDirection == ListSortDirection.Ascending
+                ? ListSortDirection.Descending
+                : ListSortDirection.Ascending;
+        }
+        else
+        {
+            _currentSortDirection = ListSortDirection.Ascending;
+            _currentSortProp = sortProp;
+        }
+
+        // Apply sort
+        var sortDescription = new SortDescription(sortProp, _currentSortDirection);
+        ICollectionView view = CollectionViewSource.GetDefaultView(list);
+        if (view != null)
+        {
+            view.SortDescriptions.Clear();
+            view.SortDescriptions.Add(sortDescription);
+        }
+    }
+}
+
+private static void OnTreeViewItemLoaded(object sender, RoutedEventArgs e)
         {
             if (sender is TreeViewItem item)
             {
