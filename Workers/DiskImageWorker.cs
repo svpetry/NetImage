@@ -93,11 +93,11 @@ namespace NetImage.Workers
         private void ExtractVolumeLabel(uint startSector, int numSectors, Bpb bpb)
         {
             var imageData = _imageData!;
-            var entryCount = numSectors * 512 / 32;
+            var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
 
             for (int i = 0; i < entryCount; i++)
             {
-                var offset = (int)(startSector * 512) + (i * 32);
+                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
 
                 if (offset + 32 > imageData.Length)
                     break;
@@ -161,11 +161,11 @@ namespace NetImage.Workers
         private void ReadDirectoryEntries(uint startSector, int numSectors, string parentPath, Bpb bpb)
         {
             var imageData = _imageData!;
-            var entryCount = numSectors * 512 / 32;
+            var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
 
             for (int i = 0; i < entryCount; i++)
             {
-                var offset = (int)(startSector * 512) + (i * 32);
+                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
 
                 if (offset + 32 > imageData.Length)
                     break;
@@ -398,11 +398,11 @@ namespace NetImage.Workers
         private byte[]? ReadFileContent(uint startSector, int numSectors, string fileName, Bpb bpb)
         {
             var imageData = _imageData!;
-            var entryCount = numSectors * 512 / 32;
+            var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
 
             for (int i = 0; i < entryCount; i++)
             {
-                var offset = (int)(startSector * 512) + (i * 32);
+                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
 
                 if (offset + 32 > imageData.Length)
                     break;
@@ -907,11 +907,11 @@ namespace NetImage.Workers
         private void CreateDirectoryEntry(uint startSector, int numSectors, string fileName, uint fileSize, uint firstCluster, bool isDirectory, Bpb bpb)
         {
             var imageData = _imageData!;
-            var entryCount = numSectors * 512 / 32;
+            var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
 
             for (int i = 0; i < entryCount; i++)
             {
-                var offset = (int)(startSector * 512) + (i * 32);
+                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
 
                 if (offset + 32 > imageData.Length)
                     break;
@@ -1012,11 +1012,11 @@ namespace NetImage.Workers
         private void DeleteEntryInternal(uint startSector, int numSectors, string name, Bpb bpb)
         {
             var imageData = _imageData!;
-            var entryCount = numSectors * 512 / 32;
+            var entryCount = numSectors * (int)bpb.BytesPerSector / 32;
 
             for (int i = 0; i < entryCount; i++)
             {
-                var offset = (int)(startSector * 512) + (i * 32);
+                var offset = (int)(startSector * bpb.BytesPerSector) + (i * 32);
 
                 if (offset + 32 > imageData.Length)
                     break;
