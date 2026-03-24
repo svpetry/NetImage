@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <ApplicationIcon>diskette.ico</ApplicationIcon>
     <Version>1.0</Version>
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
     <FileVersion>1.0.0.0</FileVersion>
@@ -16,7 +17,7 @@
     <Compile Remove="NetImage.Tests\**" />
     <EmbeddedResource Remove="NetImage.Tests\**" />
     <None Remove="NetImage.Tests\**" />
-    <Resource Include="diskette.png" />
+    <Resource Include="diskette.ico" />
   </ItemGroup>
 
 </Project>

@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:NetImage.Views"
         xmlns:vm="clr-namespace:NetImage.ViewModels"
         Title="{Binding WindowTitle}" Height="450" Width="840" MinWidth="600" MinHeight="300"
-        Icon="/diskette.png">
+        Icon="/diskette.ico">
     <Window.DataContext>
         <vm:MainViewModel/>
     </Window.DataContext>
