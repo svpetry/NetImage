@@ -533,14 +533,6 @@ namespace NetImage.ViewModels
         private static string GetApplicationVersion()
         {
             var assembly = typeof(MainViewModel).Assembly;
-            var informationalVersion = Attribute.GetCustomAttribute(
-                assembly,
-                typeof(System.Reflection.AssemblyInformationalVersionAttribute))
-                as System.Reflection.AssemblyInformationalVersionAttribute;
-
-            if (!string.IsNullOrWhiteSpace(informationalVersion?.InformationalVersion))
-                return informationalVersion.InformationalVersion;
-
             var version = assembly.GetName().Version;
             return version == null ? "0.1" : $"{version.Major}.{version.Minor}";
         }
