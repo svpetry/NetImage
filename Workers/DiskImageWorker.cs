@@ -975,47 +975,54 @@ namespace NetImage.Workers
         private void SetFatEntry(uint cluster, uint value, Bpb bpb)
         {
             var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
-            var fatOffset = (int)(fatStartSector * bpb.BytesPerSector);
+            var sectorsPerFat = bpb.SectorsPerFat == 0 ? bpb.SectorsPerFat16 : bpb.SectorsPerFat;
+            var fatSizeBytes = (int)(sectorsPerFat * bpb.BytesPerSector);
 
-            if (IsFat12(bpb))
+            // Update all FAT copies to keep them identical
+            for (uint fatIndex = 0; fatIndex < bpb.NumFats; fatIndex++)
             {
-                // FAT12
-                var entryOffset = (int)(cluster * 3 / 2);
-                var fatEntryStart = fatOffset + entryOffset;
+                var fatOffset = (int)(fatStartSector * bpb.BytesPerSector) + (int)(fatIndex * fatSizeBytes);
 
-                if (fatEntryStart + 2 > _imageData!.Length)
-                    return;
-
-                var existingValue = (ushort)(_imageData[fatEntryStart] | (_imageData[fatEntryStart + 1] << 8));
-
-                if (cluster % 2 == 0)
+                if (IsFat12(bpb))
                 {
-                    // Clear lower 12 bits and set new value
-                    existingValue &= 0xF000;
-                    existingValue |= (ushort)(value & 0x0FFF);
+                    // FAT12
+                    var entryOffset = (int)(cluster * 3 / 2);
+                    var fatEntryStart = fatOffset + entryOffset;
+
+                    if (fatEntryStart + 2 > _imageData!.Length)
+                        return;
+
+                    var existingValue = (ushort)(_imageData[fatEntryStart] | (_imageData[fatEntryStart + 1] << 8));
+
+                    if (cluster % 2 == 0)
+                    {
+                        // Clear lower 12 bits and set new value
+                        existingValue &= 0xF000;
+                        existingValue |= (ushort)(value & 0x0FFF);
+                    }
+                    else
+                    {
+                        // Clear upper 4 bits and set new value
+                        existingValue &= 0x0FFF;
+                        existingValue |= (ushort)((value & 0x0FFF) << 4);
+                    }
+
+                    _imageData![fatEntryStart] = (byte)(existingValue & 0xFF);
+                    _imageData![fatEntryStart + 1] = (byte)((existingValue >> 8) & 0xFF);
                 }
                 else
                 {
-                    // Clear upper 4 bits and set new value
-                    existingValue &= 0x0FFF;
-                    existingValue |= (ushort)((value & 0x0FFF) << 4);
+                    // FAT16
+                    var entryOffset = (int)(cluster * 2);
+                    var fatEntryStart = fatOffset + entryOffset;
+
+                    if (fatEntryStart + 2 > _imageData!.Length)
+                        return;
+
+                    var value16 = (ushort)value;
+                    _imageData![fatEntryStart] = (byte)(value16 & 0xFF);
+                    _imageData![fatEntryStart + 1] = (byte)((value16 >> 8) & 0xFF);
                 }
-
-                _imageData![fatEntryStart] = (byte)(existingValue & 0xFF);
-                _imageData![fatEntryStart + 1] = (byte)((existingValue >> 8) & 0xFF);
-            }
-            else
-            {
-                // FAT16
-                var entryOffset = (int)(cluster * 2);
-                var fatEntryStart = fatOffset + entryOffset;
-
-                if (fatEntryStart + 2 > _imageData!.Length)
-                    return;
-
-                var value16 = (ushort)value;
-                _imageData![fatEntryStart] = (byte)(value16 & 0xFF);
-                _imageData![fatEntryStart + 1] = (byte)((value16 >> 8) & 0xFF);
             }
         }
 
