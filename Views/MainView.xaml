@@ -175,8 +175,11 @@
 
         <!-- Status Bar -->
         <StatusBar Grid.Row="2">
-            <StatusBarItem>
-                <TextBlock Text="{Binding StatusText}"/>
+            <StatusBarItem Padding="4,0">
+                <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center"/>
+            </StatusBarItem>
+            <StatusBarItem Padding="4,0" DockPanel.Dock="Right" HorizontalContentAlignment="Right">
+                <TextBlock Text="{Binding DiskSpaceText}" VerticalAlignment="Center" TextAlignment="Right"/>
             </StatusBarItem>
         </StatusBar>
     </Grid>

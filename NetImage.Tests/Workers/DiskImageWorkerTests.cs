@@ -900,6 +900,58 @@ namespace NetImage.Tests.Workers
 
         #endregion
 
+        #region Disk Space Tests
+
+        [Test]
+        public async Task GetTotalBytes_WithMinimalFatImage_ReturnsUsableCapacity()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "capacity.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+
+            var bytesPerSector = BitConverter.ToUInt16(imageData, 11);
+            var sectorsPerCluster = imageData[13];
+            var reservedSectors = BitConverter.ToUInt16(imageData, 14);
+            var numberOfFats = imageData[16];
+            var rootDirectoryEntries = BitConverter.ToUInt16(imageData, 17);
+            var totalSectors = BitConverter.ToUInt16(imageData, 19);
+            var sectorsPerFat = BitConverter.ToUInt16(imageData, 22);
+            var rootDirectorySectors = (rootDirectoryEntries * 32 + (SectorSize - 1)) / SectorSize;
+            var dataSectors = totalSectors - reservedSectors - (numberOfFats * sectorsPerFat) - rootDirectorySectors;
+            var expectedBytes = (long)(dataSectors / sectorsPerCluster) * bytesPerSector * sectorsPerCluster;
+
+            // Act / Assert
+            Assert.That(worker.GetTotalBytes(), Is.EqualTo(expectedBytes));
+            Assert.That(worker.GetFreeBytes(), Is.EqualTo(expectedBytes));
+        }
+
+        [Test]
+        public async Task GetFreeBytes_AfterAddingFile_DecreasesByAllocatedClusterSize()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "free-space.img");
+            var imageData = CreateMinimalFatImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+            var totalBytes = worker.GetTotalBytes();
+            var freeBytesBeforeAdd = worker.GetFreeBytes();
+
+            // Act
+            worker.AddFile("ONEBYTE.TXT", new byte[] { 0x01 });
+
+            // Assert
+            Assert.That(worker.GetTotalBytes(), Is.EqualTo(totalBytes));
+            Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBytesBeforeAdd - SectorSize));
+        }
+
+        #endregion
+
         #region SaveAsync Tests
 
         [Test]

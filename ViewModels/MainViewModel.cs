@@ -15,6 +15,7 @@ namespace NetImage.ViewModels
     public class MainViewModel : INotifyPropertyChanged
     {
         private string _statusText = "Ready";
+        private string _diskSpaceText = string.Empty;
         private DiskImageWorker? _imageWorker;
         private TreeItem? _currentFolder;
         private TreeItem? _selectedItem;
@@ -63,6 +64,16 @@ namespace NetImage.ViewModels
             }
         }
 
+        public string DiskSpaceText
+        {
+            get => _diskSpaceText;
+            private set
+            {
+                _diskSpaceText = value;
+                OnPropertyChanged();
+            }
+        }
+
         public ObservableCollection<TreeItem> TreeItems { get; }
 
         public TreeItem? CurrentFolder
@@ -97,6 +108,7 @@ namespace NetImage.ViewModels
 
             if (openFileDialog.ShowDialog() == true)
             {
+                ClearDiskSpaceText();
                 _imageWorker = new DiskImageWorker(openFileDialog.FileName);
                 _imageWorker.LoadingStarted += OnLoadingStarted;
                 _imageWorker.LoadingCompleted += OnLoadingCompleted;
@@ -104,6 +116,7 @@ namespace NetImage.ViewModels
                 await _imageWorker.OpenAsync();
 
                 BuildTreeView();
+                RefreshDiskSpaceText();
                 CloseCommand.Enabled = true;
                 AddCommand.Enabled = true;
                 AddFolderCommand.Enabled = true;
@@ -176,6 +189,7 @@ namespace NetImage.ViewModels
             SaveAsCommand.Enabled = false;
             CurrentFolder = null;
             SelectedItem = null;
+            ClearDiskSpaceText();
             StatusText = "Ready";
         }
 
@@ -203,6 +217,7 @@ namespace NetImage.ViewModels
             }
 
             BuildTreeView();
+            RefreshDiskSpaceText();
 
             var location = string.IsNullOrEmpty(targetDir) ? "root" : targetDir;
             StatusText = $"Created folder '{args.FolderName}' in {location}";
@@ -260,6 +275,7 @@ namespace NetImage.ViewModels
             }
 
             BuildTreeView();
+            RefreshDiskSpaceText();
 
             var location = string.IsNullOrEmpty(targetDir) ? "root" : targetDir;
             StatusText = $"Added '{fileName}' to {location}";
@@ -320,6 +336,7 @@ namespace NetImage.ViewModels
             }
 
             BuildTreeView();
+            RefreshDiskSpaceText();
 
             var location = string.IsNullOrEmpty(targetDir) ? "root" : targetDir;
             StatusText = $"Added folder '{folderName}' to {location}";
@@ -343,6 +360,7 @@ namespace NetImage.ViewModels
             }
 
             BuildTreeView();
+            RefreshDiskSpaceText();
             StatusText = $"Deleted '{item.Name}'";
         }
 
@@ -471,12 +489,43 @@ namespace NetImage.ViewModels
 
         private void OnLoadingStarted(object? sender, EventArgs e)
         {
+            ClearDiskSpaceText();
             StatusText = "Loading";
         }
 
         private void OnLoadingCompleted(object? sender, EventArgs e)
         {
             StatusText = "Ready";
+        }
+
+        private void RefreshDiskSpaceText()
+        {
+            if (_imageWorker == null || !_imageWorker.IsLoaded)
+            {
+                ClearDiskSpaceText();
+                return;
+            }
+
+            DiskSpaceText = $"Total: {FormatBytes(_imageWorker.GetTotalBytes())} | Free: {FormatBytes(_imageWorker.GetFreeBytes())}";
+        }
+
+        private void ClearDiskSpaceText()
+        {
+            DiskSpaceText = string.Empty;
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes < 1024)
+                return $"{bytes} B";
+
+            if (bytes < 1024L * 1024)
+                return $"{bytes / 1024.0:F1} KB";
+
+            if (bytes < 1024L * 1024 * 1024)
+                return $"{bytes / (1024.0 * 1024):F1} MB";
+
+            return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;

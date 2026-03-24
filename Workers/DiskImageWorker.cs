@@ -686,6 +686,17 @@ namespace NetImage.Workers
             return result.ToArray();
         }
 
+        /// <summary>Returns the total usable byte capacity available for file data on the disk image.</summary>
+        public long GetTotalBytes()
+        {
+            if (_imageData == null || !_isLoaded)
+                return 0;
+
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512));
+            return (long)bpb.ClusterCount * bpb.BytesPerSector * bpb.SectorsPerCluster;
+        }
+
         /// <summary>Returns an estimate of free bytes remaining on the disk image.</summary>
         public long GetFreeBytes()
         {
