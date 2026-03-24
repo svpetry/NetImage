@@ -70,6 +70,20 @@ Run the tests:
 dotnet test NetImage.Tests/NetImage.Tests.csproj
 ```
 
+## Creating a release package
+
+Maintainers can build the Windows release folder and an Explorer-friendly ZIP archive with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Publish-Release.ps1
+```
+
+The script reads the version from `NetImage.csproj`, publishes the app, creates a ZIP in `artifacts\release\`, and prints the SHA-256 hash. To replace the asset of an existing GitHub release tag, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\Publish-Release.ps1 -UploadToGitHubRelease
+```
+
 ## Project structure
 
 - `Models/` contains the tree/list item model used by the UI
