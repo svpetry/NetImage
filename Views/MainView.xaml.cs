@@ -86,19 +86,32 @@ namespace NetImage.Views
 
         private void MainListViewItem_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
-            if (sender is ListViewItem lvi && lvi.Content is TreeItem item)
+            if (sender is not ListViewItem { Content: TreeItem item } || DataContext is not MainViewModel vm)
             {
-                if (item.IsFolder)
-                {
-                    if (DataContext is MainViewModel vm && vm.CurrentFolder != null)
-                    {
-                        vm.CurrentFolder.IsExpanded = true;
-                        MainTreeView.UpdateLayout();
-                    }
-                    item.IsSelected = true;
-                    item.IsExpanded = true;
-                }
+                return;
             }
+
+            vm.SelectedItem = item;
+
+            if (!item.IsFolder)
+            {
+                if (vm.ExtractCommand.CanExecute(null))
+                {
+                    vm.ExtractCommand.Execute(null);
+                }
+
+                e.Handled = true;
+                return;
+            }
+
+            if (vm.CurrentFolder != null)
+            {
+                vm.CurrentFolder.IsExpanded = true;
+                MainTreeView.UpdateLayout();
+            }
+
+            item.IsSelected = true;
+            item.IsExpanded = true;
         }
 
         private void OnCreateFolderRequested(object? sender, CreateFolderRequestEventArgs e)

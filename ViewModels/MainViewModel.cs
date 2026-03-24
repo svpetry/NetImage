@@ -14,6 +14,7 @@ namespace NetImage.ViewModels
 {
     public class MainViewModel : INotifyPropertyChanged
     {
+        private const string ApplicationName = "NetImage";
         private string _statusText = "Ready";
         private string _diskSpaceText = string.Empty;
         private DiskImageWorker? _imageWorker;
@@ -53,6 +54,7 @@ namespace NetImage.ViewModels
         public ActionCommand ExtractCommand { get; }
         public ActionCommand SaveCommand { get; }
         public ActionCommand SaveAsCommand { get; }
+        public string WindowTitle => $"{ApplicationName} {GetApplicationVersion()}";
 
         public string StatusText
         {
@@ -526,6 +528,21 @@ namespace NetImage.ViewModels
                 return $"{bytes / (1024.0 * 1024):F1} MB";
 
             return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+        }
+
+        private static string GetApplicationVersion()
+        {
+            var assembly = typeof(MainViewModel).Assembly;
+            var informationalVersion = Attribute.GetCustomAttribute(
+                assembly,
+                typeof(System.Reflection.AssemblyInformationalVersionAttribute))
+                as System.Reflection.AssemblyInformationalVersionAttribute;
+
+            if (!string.IsNullOrWhiteSpace(informationalVersion?.InformationalVersion))
+                return informationalVersion.InformationalVersion;
+
+            var version = assembly.GetName().Version;
+            return version == null ? "0.1" : $"{version.Major}.{version.Minor}";
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
