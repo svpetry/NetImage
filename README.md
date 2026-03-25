@@ -54,10 +54,9 @@ NetImage is already very capable for classic DOS-era image workflows, but a few 
 
 ## Download
 
-The latest tagged release is [v1.0](https://github.com/svpetry/NetImage/releases/tag/v1.0).
+The latest tagged release is [v1.1](https://github.com/svpetry/NetImage/releases/tag/v1.1).
 
-The `main` branch currently includes newer features such as blank-image creation and direct text-file
-editing, so building from source gives you the newest functionality.
+Build from source if you want the latest in-progress changes from the `main` branch.
 
 ## Building from source
 
@@ -124,6 +123,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Publish-Release.ps1 -UploadTo
 
 ## Status
 
-NetImage is actively evolving. The tagged `v1.0` release covers the core browsing and modification
-workflow, and the current `main` branch adds newer convenience features such as creating blank images
-and editing text files directly inside the disk image.
+NetImage is actively evolving. The tagged `v1.1` release covers the current browsing, modification,
+blank-image creation, and text-editing workflow, and the `main` branch may include newer work in
+progress.
