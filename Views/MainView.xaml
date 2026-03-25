@@ -85,7 +85,7 @@
                 <Separator />
                 <Button Command="{Binding EditCommand}" Background="Transparent" BorderThickness="0" Margin="2,0">
                     <StackPanel Orientation="Vertical" Margin="4">
-                        <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE79F;" FontSize="20" HorizontalAlignment="Center"/>
+                        <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE70F;" FontSize="20" HorizontalAlignment="Center"/>
                         <TextBlock Text="Edit" HorizontalAlignment="Center" Margin="0,2,0,0" FontSize="11"/>
                     </StackPanel>
                 </Button>
