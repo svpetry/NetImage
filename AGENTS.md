@@ -1,206 +1,73 @@
-# AGENTS.md — NetImage Project Guide
+# AGENTS.md - NetImage Project Guide
 
-This file provides a complete reference for coding agents working on the **NetImage** project.
-Always read this file before making changes.
+Read this file before making changes.
 
----
+## Project Summary
 
-## Project Overview
+NetImage is a Windows desktop app for opening FAT disk images (`.ima`, `.img`), browsing their
+contents, modifying them, and saving the result back to disk.
 
-**NetImage** is a Windows desktop application (WPF) written in **C# / .NET 10** that allows users to
-open FAT-formatted floppy/hard-disk image files (`.ima`, `.img`) and browse/modify their contents.
-The application supports viewing files in a tree/list view, adding files and folders, creating
-folders, deleting entries, extracting files, and saving modified images.
+- Language: C# 13 with nullable enabled and implicit usings enabled
+- Framework: .NET 10 (`net10.0-windows`)
+- UI: WPF
+- Architecture: MVVM
+- Testing: NUnit
 
----
+## Important Areas
 
-## Technology Stack
+You usually only need to know these parts of the codebase:
 
-| Concern | Choice |
-|---|---|
-| Language | C# 13, nullable enabled, implicit usings enabled |
-| Framework | .NET 10 (`net10.0-windows`) |
-| UI | WPF (Windows Presentation Foundation) |
-| Architecture | MVVM (Model-View-ViewModel) |
-| Build system | MSBuild via `NetImage.csproj` / `NetImage.slnx` |
-| Output type | Windows executable (`WinExe`) |
-| Testing | NUnit 4.3.2 with NUnit3TestAdapter |
+- `Workers/DiskImageWorker.cs`: FAT12/FAT16 parsing, reading, extraction, add/delete/create-folder,
+  and save logic
+- `ViewModels/MainViewModel.cs`: main application state, commands, and UI coordination
+- `Models/TreeItem.cs`: tree/list item model used by the UI
+- `Views/`: WPF windows and dialogs; keep code-behind minimal
+- `Utils/ActionCommand.cs`: the project's `ICommand` implementation
+- `NetImage.Tests/`: NUnit tests, mostly focused on `DiskImageWorker`
 
----
+## MVVM Rules
 
-## Repository Layout
+- Keep business logic out of WPF code-behind.
+- ViewModels must not reference `System.Windows` or other WPF UI types.
+- Expose commands as `ActionCommand`; do not introduce another command framework unless asked.
+- Do UI wiring in XAML bindings rather than code-behind.
+- Implement `INotifyPropertyChanged` manually with `[CallerMemberName]`; do not add a base class or
+  source generator without discussion.
+- Use ViewModel events for view interaction and error reporting instead of direct view calls.
 
-```
-NetImage/
-├── App.xaml / App.xaml.cs           # WPF application entry point
-├── AssemblyInfo.cs                   # Assembly metadata (themes)
-├── NetImage.csproj                   # Main project file (excludes Tests)
-├── NetImage.slnx                     # Solution file
-├── diskette.png                      # Application icon
-│
-├── Models/
-│   └── TreeItem.cs                   # INotifyPropertyChanged tree node model
-│
-├── ViewModels/
-│   ├── MainViewModel.cs              # Main window view model; orchestrates commands & state
-│   └── CreateFolderRequestEventArgs.cs # EventArgs for folder creation dialog
-│
-├── Views/
-│   ├── MainView.xaml / MainView.xaml.cs      # Main window (toolbar, tree, list, status bar)
-│   └── FolderNameDialog.xaml / .cs           # Dialog for creating new folders
-│
-├── Utils/
-│   └── ActionCommand.cs              # ICommand implementation backed by Action<object?>
-│
-├── Workers/
-│   └── DiskImageWorker.cs            # FAT filesystem parser and modifier
-│
-└── NetImage.Tests/
-    ├── NetImage.Tests.csproj         # Test project (references main project)
-    ├── Workers/
-    │   └── DiskImageWorkerTests.cs   # NUnit tests for DiskImageWorker
-    └── data/
-        └── test.ima                  # Test disk image file
-```
+## Coding Conventions
 
----
+- Namespaces follow folder structure: `NetImage`, `NetImage.Models`, `NetImage.ViewModels`, and so
+  on.
+- Use `var` when the type is obvious from the right-hand side.
+- Prefer `Span<byte>` and `ReadOnlySpan<byte>` when parsing image data.
+- Keep nullable annotations correct.
+- Rely on implicit usings where possible.
+- Avoid adding NuGet dependencies unless there is a clear need.
 
-## Key Classes
-
-### `Models/TreeItem.cs`
-- A self-referential tree node used as items in the WPF `TreeView` and `ListView`.
-- Properties:
-  - `Name` (read-only `string`) — display name
-  - `Path` (read-only `string`) — full backslash-separated path inside image (empty = root)
-  - `Size` (read-only `long?`) — file size; `null` indicates a folder
-  - `Modified` (read-only `DateTime?`) — last modified timestamp
-  - `FormattedSize` — human-readable size string (e.g., "1.5 KB")
-  - `FormattedModified` — formatted date string (e.g., "2024-01-15 14:30")
-  - `IsFolder` — computed property (`Size == null`)
-  - `IconGlyph` — Segoe Fluent Icons glyph for folder/file
-  - `Children` (`ObservableCollection<TreeItem>`) — for hierarchical tree view
-  - `Items` (`ObservableCollection<TreeItem>`) — for flat list view
-  - `IsExpanded` / `IsSelected` — notifying properties for UI state
-- Implements `INotifyPropertyChanged`.
-
-### `ViewModels/MainViewModel.cs`
-- Implements `INotifyPropertyChanged`.
-- Commands: `OpenCommand`, `SaveCommand`, `SaveAsCommand`, `CloseCommand`, `CreateFolderCommand`, `AddFolderCommand`, `AddCommand`, `DeleteCommand`, `ExtractCommand`.
-- Properties:
-  - `TreeItems` (`ObservableCollection<TreeItem>`) — root collection for tree view
-  - `CurrentFolder` (`TreeItem?`) — currently selected folder, drives list view
-  - `SelectedItem` (`TreeItem?`) — currently selected item (file or folder)
-  - `StatusText` — status bar text
-- Events for UI communication: `CreateFolderRequested`, `CreateFolderError`, `AddError`, `DeleteError`, `ExtractError`, `SaveError`.
-- `BuildTreeView()` constructs the full tree hierarchy from `FilesAndFolders`, including subdirectories.
-- `GetSelectedFolderPath()` determines target folder for add operations based on selection.
-
-### `Views/MainView.xaml`
-- Three-row `Grid`: toolbar (row 0), content area (row 1), status bar (row 2).
-- Content area has two panes:
-  - Left: `TreeView` showing folder hierarchy
-  - Right: `ListView` showing contents of selected folder (Name, Date modified, Size columns)
-- Toolbar buttons with Segoe Fluent Icons for all operations.
-- `DataContext` set declaratively to `<vm:MainViewModel/>`.
-
-### `Views/FolderNameDialog.xaml`
-- Simple dialog for creating new folders.
-- Contains a `TextBox` for folder name (max 8 characters for FAT 8.3 format).
-- Returns `FolderName` property when OK is clicked.
-
-### `Utils/ActionCommand.cs`
-- Thin `ICommand` wrapper around `Action<object?>`.
-- `Enabled` property raises `CanExecuteChanged` when toggled.
-
-### `Workers/DiskImageWorker.cs`
-- Core FAT filesystem parser and modifier.
-- `FileEntry` record: `(string Path, long? Size, DateTime? Modified)`
-- Properties:
-  - `FilePath` — path to the image file on disk
-  - `VolumeLabel` — extracted volume label from FAT
-  - `FilesAndFolders` — list of all entries found in the image
-  - `IsLoaded` — whether the image has been opened
-- Events: `LoadingStarted`, `LoadingCompleted`
-- **Reading:**
-  - `OpenAsync()` — loads image into memory and parses FAT filesystem
-  - `GetFileContent(path)` — reads file bytes from the image
-  - `ExtractFolder(sourcePath, destPath)` — extracts entire folder to host filesystem
-- **Writing:**
-  - `SaveAsync(path)` — saves modified image to disk
-  - `AddFile(targetDirectory, fileName, content)` — adds a file to the image
-  - `AddHostDirectory(targetDirectory, hostFolderPath)` — recursively adds a host folder
-  - `CreateFolder(targetDirectory, folderName)` — creates a new folder
-  - `DeleteEntry(path)` — deletes a file or folder (recursively for folders)
-  - `GetFreeBytes()` — estimates available space on the image
-- **FAT support:** FAT12 and FAT16; handles subdirectory traversal via cluster chains.
-
----
-
-## MVVM Conventions
-
-- **ViewModels** never directly reference `System.Windows` or WPF types; keep UI framework
-  dependencies inside Views only.
-- **Commands** are `ActionCommand` instances exposed as public properties on the ViewModel. Do not
-  use `RelayCommand` or any third-party MVVM library unless explicitly introduced.
-- **Data binding** is always done in XAML; code-behind files are kept minimal (no business logic).
-- **INotifyPropertyChanged** is implemented manually with `[CallerMemberName]` — do not introduce
-  a base class or source generator without discussing first.
-- **UI-to-ViewModel communication** uses events on the ViewModel (e.g., `CreateFolderRequested`,
-  `AddError`) rather than direct method calls from code-behind.
-
----
-
-## Coding Style
-
-- **Namespaces** follow the folder structure: `NetImage`, `NetImage.Models`, `NetImage.ViewModels`,
-  `NetImage.Views`, `NetImage.Utils`, `NetImage.Workers`.
-- Use `var` where the type is obvious from the right-hand side.
-- Prefer `ReadOnlySpan<byte>` / `Span<byte>` over byte-array copies when parsing binary data.
-- Nullable reference types are enabled project-wide; annotate accordingly.
-- Implicit usings are enabled — do not add `using System;` or other BCL namespaces that are
-  already in scope implicitly.
-- No third-party NuGet packages are currently used; add only when necessary and keep the
-  dependency footprint minimal.
-
----
-
-## Building & Running
+## Build And Test
 
 ```powershell
-# Build main project
 dotnet build NetImage.csproj
-
-# Run application
 dotnet run --project NetImage.csproj
-
-# Run tests
 dotnet test NetImage.Tests/NetImage.Tests.csproj
-
-# Or open NetImage.slnx in Visual Studio 2022 / JetBrains Rider and press F5
 ```
 
-The project requires the **.NET 10 SDK** and runs on **Windows only** (WPF is Windows-exclusive).
+The app requires the .NET 10 SDK and runs on Windows only.
 
----
+## Product Constraints
 
-## Known Limitations / Future Work
+- FAT12 and FAT16 are supported; FAT32 is not.
+- Long file names are skipped.
+- File and folder names are normalized to FAT 8.3 format.
+- Cluster allocation uses a simple linear search.
+- There is no undo/redo support.
+- User input is not fully validated for FAT-illegal characters.
+- Most file operations still run on the UI thread except `OpenAsync` and `SaveAsync`.
 
-- **FAT format:** Only FAT12 and FAT16 are supported; FAT32 is not yet implemented.
-- **LFN (Long File Names):** Directory entries with long file names (LFN) are silently skipped.
-- **8.3 encoding:** All file/folder names are converted to 8.3 format (uppercase, truncated).
-- **Cluster allocation:** Uses simple linear search for free clusters; may be slow on large images.
-- **No undo/redo:** Modifications to the image are immediate with no undo support.
-- **No validation:** User input (e.g., folder names) is not validated for illegal FAT characters.
-- **Single-threaded UI:** File operations run synchronously on the UI thread for most operations
-  (except `OpenAsync` and `SaveAsync`).
+## Testing Notes
 
----
-
-## Testing Conventions
-
-- Tests are written using **NUnit** in the `NetImage.Tests` project.
-- Test data files (e.g., `test.ima`) are stored in `NetImage.Tests/data/` and copied to output.
-- Tests that create temporary files use `Path.GetTempPath()` with unique GUID subdirectories.
-- Use `[SetUp]` and `[TearDown]` for per-test cleanup.
-- Helper methods for creating mock FAT images are defined within test classes.
-- Prefer testing the `DiskImageWorker` directly over UI integration tests.
+- Prefer direct tests for `DiskImageWorker` over UI integration tests.
+- Test assets live under `NetImage.Tests/data/`.
+- Temporary-file tests should use a unique directory under `Path.GetTempPath()` and clean up after
+  themselves.
