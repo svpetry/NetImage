@@ -100,7 +100,8 @@ namespace NetImage.Workers
             System.Diagnostics.Debug.WriteLine($"FAT boot sector found at sector {_partitionStartSector}");
 
             var bpb = ParseBpb(bootSector);
-            if (GetFatType(bpb) == FatType.Fat32)
+            _fatType = GetFatType(bpb);
+            if (_fatType == FatType.Fat32)
             {
                 System.Diagnostics.Debug.WriteLine("FAT32 is not supported.");
                 return;
@@ -1390,12 +1391,19 @@ namespace NetImage.Workers
             }
         }
 
-        private enum FatType
+        public enum FatType
         {
             Fat12,
             Fat16,
             Fat32
         }
+
+        private FatType? _fatType;
+
+        /// <summary>
+        /// Gets the FAT filesystem type of the loaded image, or null if not loaded.
+        /// </summary>
+        public FatType? FilesystemType => _fatType;
 
         private readonly struct DirectoryLocation(uint startSector, int numSectors, uint firstCluster)
         {
@@ -1531,6 +1539,7 @@ namespace NetImage.Workers
             InitializeRootDirectory(rootDirEntries, reservedSectors, numFats, sectorsPerFat, bytesPerSector, volumeLabel);
 
             _isLoaded = true;
+            _fatType = FatType.Fat12;
             VolumeLabel = volumeLabel;
             FilesAndFolders.Clear();
         }

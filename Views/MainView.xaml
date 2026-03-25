@@ -193,7 +193,11 @@
                 <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center"/>
             </StatusBarItem>
             <StatusBarItem Padding="4,0" DockPanel.Dock="Right" HorizontalContentAlignment="Right">
-                <TextBlock Text="{Binding DiskSpaceText}" VerticalAlignment="Center" TextAlignment="Right"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="{Binding FilesystemTypeText}" VerticalAlignment="Center" Foreground="Gray"/>
+                    <TextBlock Text=" | " VerticalAlignment="Center" Foreground="Gray"/>
+                    <TextBlock Text="{Binding DiskSpaceText}" VerticalAlignment="Center" TextAlignment="Right"/>
+                </StackPanel>
             </StatusBarItem>
         </StatusBar>
     </Grid>

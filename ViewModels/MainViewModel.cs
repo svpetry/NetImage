@@ -20,6 +20,7 @@ namespace NetImage.ViewModels
         private const string ApplicationName = "NetImage";
         private string _statusText = "Ready";
         private string _diskSpaceText = string.Empty;
+        private string _filesystemTypeText = string.Empty;
         private DiskImageWorker? _imageWorker;
         private TreeItem? _currentFolder;
         private TreeItem? _selectedItem;
@@ -81,6 +82,16 @@ namespace NetImage.ViewModels
             private set
             {
                 _diskSpaceText = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public string FilesystemTypeText
+        {
+            get => _filesystemTypeText;
+            private set
+            {
+                _filesystemTypeText = value;
                 OnPropertyChanged();
             }
         }
@@ -622,6 +633,7 @@ namespace NetImage.ViewModels
                 return;
             }
 
+            FilesystemTypeText = _imageWorker.FilesystemType?.ToString() ?? string.Empty;
             DiskSpaceText = $"Total: {FormatBytes(_imageWorker.GetTotalBytes())} | Free: {FormatBytes(_imageWorker.GetFreeBytes())}";
         }
 
