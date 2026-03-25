@@ -20,6 +20,13 @@
         <!-- Menu Bar -->
         <ToolBarTray Grid.Row="0" Background="Transparent">
             <ToolBar>
+                <Button Command="{Binding NewCommand}" Background="Transparent" BorderThickness="0" Margin="2,0">
+                    <StackPanel Orientation="Vertical" Margin="4">
+                        <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE710;" FontSize="20" HorizontalAlignment="Center"/>
+                        <TextBlock Text="New" HorizontalAlignment="Center" Margin="0,2,0,0" FontSize="11"/>
+                    </StackPanel>
+                </Button>
+                <Separator />
                 <Button Command="{Binding OpenCommand}" Background="Transparent" BorderThickness="0" Margin="2,0">
                     <StackPanel Orientation="Vertical" Margin="4">
                         <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8E5;" FontSize="20" HorizontalAlignment="Center"/>

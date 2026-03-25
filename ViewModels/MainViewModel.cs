@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Microsoft.Win32;
 using NetImage.Models;
 using NetImage.Utils;
+using NetImage.Views;
 using NetImage.Workers;
 
 namespace NetImage.ViewModels
@@ -33,6 +34,7 @@ namespace NetImage.ViewModels
 
         public MainViewModel()
         {
+            NewCommand = new ActionCommand(ExecuteNew);
             OpenCommand = new ActionCommand(ExecuteOpen);
             CloseCommand = new ActionCommand(ExecuteClose) { Enabled = false };
             AddCommand = new ActionCommand(ExecuteAdd) { Enabled = false };
@@ -45,6 +47,7 @@ namespace NetImage.ViewModels
             TreeItems = new ObservableCollection<TreeItem>();
         }
 
+        public ActionCommand NewCommand { get; }
         public ActionCommand OpenCommand { get; }
         public ActionCommand CloseCommand { get; }
         public ActionCommand AddCommand { get; }
@@ -99,6 +102,32 @@ namespace NetImage.ViewModels
                 DeleteCommand.Enabled = value != null;
                 ExtractCommand.Enabled = value != null;
             }
+        }
+
+        private void ExecuteNew(object? parameter)
+        {
+            var dialog = new NewDiskImageDialog();
+            if (dialog.ShowDialog() != true || dialog.SelectedSize == 0)
+                return;
+
+            // Create new image worker with blank FAT image
+            _imageWorker = new DiskImageWorker(string.Empty);
+            _imageWorker.LoadingStarted += OnLoadingStarted;
+            _imageWorker.LoadingCompleted += OnLoadingCompleted;
+
+            _imageWorker.CreateBlankImage(dialog.SelectedSize, "DISK");
+
+            BuildTreeView();
+            RefreshDiskSpaceText();
+            CloseCommand.Enabled = true;
+            AddCommand.Enabled = true;
+            AddFolderCommand.Enabled = true;
+            CreateFolderCommand.Enabled = true;
+            SaveCommand.Enabled = false; // New image not saved yet
+            SaveAsCommand.Enabled = true;
+
+            var sizeKB = dialog.SelectedSize / 1024;
+            StatusText = $"New {sizeKB} KB disk image created";
         }
 
         private async void ExecuteOpen(object? parameter)
@@ -451,7 +480,7 @@ namespace NetImage.ViewModels
             {
                 Title = "Save Disk Image As",
                 Filter = "Disk Image Files|*.ima;*.img|All Files|*.*",
-                FileName = System.IO.Path.GetFileName(_imageWorker.FilePath)
+                FileName = string.IsNullOrEmpty(_imageWorker.FilePath) ? "newdisk.img" : System.IO.Path.GetFileName(_imageWorker.FilePath)
             };
 
             if (saveFileDialog.ShowDialog() == true)
@@ -460,6 +489,7 @@ namespace NetImage.ViewModels
                 {
                     await _imageWorker.SaveAsync(saveFileDialog.FileName);
                     _imageWorker.FilePath = saveFileDialog.FileName;
+                    SaveCommand.Enabled = true;
                     StatusText = $"Saved as: {saveFileDialog.FileName}";
                 }
                 catch (Exception ex)

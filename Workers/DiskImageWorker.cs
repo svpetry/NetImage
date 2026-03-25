@@ -1325,5 +1325,209 @@ namespace NetImage.Workers
             public uint SectorsPerFat { get; set; }
             public uint ClusterCount { get; set; }
         }
+
+        /// <summary>
+        /// Creates a new blank FAT12 disk image with the specified size.
+        /// </summary>
+        /// <param name="imageSize">Total size of the image in bytes (must be a multiple of 512).</param>
+        /// <param name="volumeLabel">Optional volume label (max 11 characters).</param>
+        public void CreateBlankImage(long imageSize, string volumeLabel = "")
+        {
+            if (imageSize <= 0 || imageSize % 512 != 0)
+                throw new ArgumentException("Image size must be a positive multiple of 512 bytes.");
+
+            if (!string.IsNullOrEmpty(volumeLabel) && volumeLabel.Length > 11)
+                volumeLabel = volumeLabel.Substring(0, 11);
+
+            _imageData = new byte[imageSize];
+            var totalSectors = (uint)(imageSize / 512);
+
+            // Calculate FAT12 parameters
+            uint bytesPerSector = 512;
+            byte sectorsPerCluster = GetSectorsPerCluster(totalSectors);
+            uint reservedSectors = 3; // Standard for FAT12
+            byte numFats = 2;
+            uint rootDirEntries = 224; // Standard for 360KB+ floppies
+            uint sectorsPerFat = CalculateSectorsPerFat(totalSectors, sectorsPerCluster);
+            uint sectorsPerTrack = 18; // Standard for high-density floppies
+            uint headsPerCylinder = 2; // Standard for high-density floppies
+
+            // Calculate root directory size
+            uint rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
+
+            // Calculate data area and cluster count
+            uint dataStartSector = reservedSectors + (numFats * sectorsPerFat) + rootDirSectors;
+            uint dataSectors = totalSectors - dataStartSector;
+            uint clusterCount = dataSectors / sectorsPerCluster;
+
+            // Build boot sector
+            var bootSector = _imageData.AsSpan(0, 512);
+
+            // Jump instruction to skip BPB
+            bootSector[0] = 0xEB;
+            bootSector[1] = 0x58; // Jump offset
+            bootSector[2] = 0x90; // NOP
+
+            // OEM ID (7 bytes)
+            var oemBytes = System.Text.Encoding.ASCII.GetBytes("MSDOS5.0");
+            for (int i = 0; i < 7; i++) bootSector[3 + i] = oemBytes[i];
+
+            // Bytes per sector (offset 11, 2 bytes)
+            bootSector[11] = (byte)(bytesPerSector & 0xFF);
+            bootSector[12] = (byte)((bytesPerSector >> 8) & 0xFF);
+
+            // Sectors per cluster (offset 13, 1 byte)
+            bootSector[13] = sectorsPerCluster;
+
+            // Reserved sectors (offset 14, 2 bytes)
+            bootSector[14] = (byte)(reservedSectors & 0xFF);
+            bootSector[15] = (byte)((reservedSectors >> 8) & 0xFF);
+
+            // Number of FATs (offset 16, 1 byte)
+            bootSector[16] = numFats;
+
+            // Root directory entries (offset 17, 2 bytes)
+            bootSector[17] = (byte)(rootDirEntries & 0xFF);
+            bootSector[18] = (byte)((rootDirEntries >> 8) & 0xFF);
+
+            // Total sectors (16-bit, offset 19, 2 bytes) - set to 0 for >32768 sectors
+            bootSector[19] = 0x00;
+            bootSector[20] = 0x00;
+
+            // Media descriptor (offset 21, 1 byte) - 0xF8 for 1.44MB floppy
+            bootSector[21] = 0xF8;
+
+            // Sectors per FAT (16-bit, offset 22, 2 bytes)
+            bootSector[22] = (byte)(sectorsPerFat & 0xFF);
+            bootSector[23] = (byte)((sectorsPerFat >> 8) & 0xFF);
+
+            // Sectors per track (offset 24, 2 bytes)
+            bootSector[24] = (byte)(sectorsPerTrack & 0xFF);
+            bootSector[25] = (byte)((sectorsPerTrack >> 8) & 0xFF);
+
+            // Heads per cylinder (offset 26, 2 bytes)
+            bootSector[26] = (byte)(headsPerCylinder & 0xFF);
+            bootSector[27] = (byte)((headsPerCylinder >> 8) & 0xFF);
+
+            // Hidden sectors (offset 28, 4 bytes)
+            bootSector[28] = 0x00;
+            bootSector[29] = 0x00;
+            bootSector[30] = 0x00;
+            bootSector[31] = 0x00;
+
+            // Total sectors (32-bit, offset 32, 4 bytes)
+            bootSector[32] = (byte)(totalSectors & 0xFF);
+            bootSector[33] = (byte)((totalSectors >> 8) & 0xFF);
+            bootSector[34] = (byte)((totalSectors >> 16) & 0xFF);
+            bootSector[35] = (byte)((totalSectors >> 24) & 0xFF);
+
+            // Boot code (offset 63, 448 bytes) - NOPs
+            // Already zeroed
+
+            // Boot signature (offset 510, 2 bytes)
+            bootSector[510] = 0x55;
+            bootSector[511] = 0xAA;
+
+            // Initialize FATs
+            InitializeFats(sectorsPerFat, clusterCount, reservedSectors, numFats, bytesPerSector);
+
+            // Initialize root directory
+            InitializeRootDirectory(rootDirEntries, reservedSectors, numFats, sectorsPerFat, bytesPerSector, volumeLabel);
+
+            _isLoaded = true;
+            VolumeLabel = volumeLabel;
+            FilesAndFolders.Clear();
+        }
+
+        private byte GetSectorsPerCluster(uint totalSectors)
+        {
+            // Choose sectors per cluster based on total size
+            // Aim for reasonable cluster count for FAT12 (< 4085 clusters)
+            if (totalSectors <= 306) // ~160KB
+                return 1;
+            if (totalSectors <= 720) // ~360KB
+                return 1;
+            if (totalSectors <= 1440) // ~720KB
+                return 1;
+            if (totalSectors <= 2880) // ~1.44MB
+                return 1;
+            return 2; // ~2.88MB
+        }
+
+        private uint CalculateSectorsPerFat(uint totalSectors, byte sectorsPerCluster)
+        {
+            uint reservedSectors = 3;
+            byte numFats = 2;
+            uint rootDirEntries = 224;
+            uint bytesPerSector = 512;
+
+            uint rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
+            uint dataStart = reservedSectors + (numFats * 1u) + rootDirSectors; // Start with 1 sector per FAT
+            uint dataSectors = totalSectors - dataStart;
+            uint clusterCount = dataSectors / sectorsPerCluster;
+
+            // FAT12: 1.5 bytes per cluster entry
+            uint fatSectors = ((clusterCount * 3u / 2) + 1) / bytesPerSector;
+            if (fatSectors < 1) fatSectors = 1;
+
+            return fatSectors;
+        }
+
+        private void InitializeFats(uint sectorsPerFat, uint clusterCount, uint reservedSectors, byte numFats, uint bytesPerSector)
+        {
+            var mediaDescriptor = (byte)((_imageData[21] & 0xF0) | 0x0F); // Mark first 3 entries as reserved
+
+            for (byte fatNum = 0; fatNum < numFats; fatNum++)
+            {
+                uint fatStart = reservedSectors + (fatNum * sectorsPerFat);
+                uint fatOffset = fatStart * bytesPerSector;
+
+                // First entry: media descriptor + 3 high bits
+                _imageData[fatOffset] = (byte)(mediaDescriptor & 0xFF);
+                _imageData[fatOffset + 1] = (byte)((mediaDescriptor >> 8) & 0x0F);
+
+                // Second entry: reserved (bad cluster marker)
+                _imageData[fatOffset + 1] |= 0xF0;
+                _imageData[fatOffset + 2] = 0x00;
+
+                // Third entry: end of chain marker for cluster 2 (start of data)
+                // Actually, we leave all entries as 0 (free) initially
+                // The rest of the FAT is already zeroed
+            }
+        }
+
+        private void InitializeRootDirectory(uint rootDirEntries, uint reservedSectors, byte numFats, uint sectorsPerFat, uint bytesPerSector, string volumeLabel)
+        {
+            uint rootDirStart = reservedSectors + (numFats * sectorsPerFat);
+            uint rootDirOffset = rootDirStart * bytesPerSector;
+
+            // Clear root directory (already zeroed, but be explicit)
+            uint rootDirSize = rootDirEntries * 32;
+            // Already zeroed from new byte[]
+
+            // Add volume label if specified
+            if (!string.IsNullOrEmpty(volumeLabel))
+            {
+                CreateVolumeLabelEntry(_imageData.AsSpan((int)rootDirOffset), volumeLabel);
+            }
+        }
+
+        private void CreateVolumeLabelEntry(Span<byte> entry, string label)
+        {
+            if (label.Length > 11)
+                label = label.Substring(0, 11);
+
+            // Pad label with spaces
+            var paddedLabel = label.PadRight(11);
+            var labelBytes = System.Text.Encoding.ASCII.GetBytes(paddedLabel);
+
+            // Write name (8 bytes) and extension (3 bytes)
+            for (int i = 0; i < 11; i++) entry[i] = labelBytes[i];
+
+            // Attribute: volume label (0x08)
+            entry[11] = 0x08;
+
+            // Remaining fields are zeroed (reserved, time, date, clusters, size)
+        }
     }
 }
