@@ -1,17 +1,25 @@
 # NetImage
 
-NetImage is a Windows desktop application for opening and editing classic FAT disk images without dropping to a command line or digging through a hex editor. If you work with floppy images, old hard-disk images, or retro software archives, NetImage gives you a clean graphical way to inspect, extract, and update them.
+NetImage is a Windows desktop application for working with classic FAT disk images without dropping
+to a command line or digging through a hex editor. You can open existing `.ima` and `.img` files,
+create new blank images, browse their contents, extract files, make changes, and save the result
+back to disk.
 
-It is built with WPF and .NET 10, focuses on FAT12 and FAT16 images, and is designed to make everyday image management feel quick and approachable.
+It is built with WPF and .NET 10, focuses on FAT12 and FAT16 images, and is designed to make
+everyday image management feel quick and approachable.
 
 ## Why NetImage is useful
 
-- Open `.ima` and `.img` disk images in a native Windows UI
+- Open existing `.ima` and `.img` disk images in a native Windows UI
+- Create new blank FAT disk images from common preset sizes
 - Browse folders and files with a tree view and a detail list
 - Extract individual files or whole directories to your host machine
 - Add files and entire folders back into the image
 - Create folders directly inside the disk image
+- Edit text files directly inside the image
 - Delete files and folders and save the modified image back to disk
+- Save in place or use Save As to write a new image file
+- See total and free space for the loaded image in the status bar
 - Keep track of image contents without relying on vintage tools or manual filesystem inspection
 
 ## What makes it nice
@@ -30,6 +38,7 @@ That means:
 - FAT12
 - FAT16
 - Disk image files with `.ima` and `.img` extensions
+- Raw FAT filesystems and MBR-partitioned disk images with a FAT12/FAT16 partition
 
 ## Current limitations
 
@@ -40,10 +49,15 @@ NetImage is already very capable for classic DOS-era image workflows, but a few 
 - File and folder names are normalized to FAT 8.3 format
 - Cluster allocation uses a simple linear search
 - There is currently no undo/redo system
+- Text editing is intended for text-like files; known binary file types are not opened in the editor
+- Most file operations still run on the UI thread except opening and saving
 
 ## Download
 
-The current public release is [v1.0](https://github.com/svpetry/NetImage/releases/tag/v1.0).
+The latest tagged release is [v1.0](https://github.com/svpetry/NetImage/releases/tag/v1.0).
+
+The `main` branch currently includes newer features such as blank-image creation and direct text-file
+editing, so building from source gives you the newest functionality.
 
 ## Building from source
 
@@ -94,10 +108,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Publish-Release.ps1 -UploadTo
 
 ## Typical workflow
 
-1. Open a FAT disk image.
+1. Open an existing FAT disk image or create a new blank one.
 2. Browse its folders and files in the tree and list panes.
-3. Extract what you need, or add/create/delete content.
-4. Save the modified image back to disk.
+3. Extract what you need, or add, create, delete, and edit content.
+4. Keep an eye on remaining free space in the status bar.
+5. Save the modified image back to disk or use Save As for a new file.
 
 ## Tech stack
 
@@ -109,4 +124,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Publish-Release.ps1 -UploadTo
 
 ## Status
 
-NetImage is now at **version 1.0** and already delivers a genuinely handy workflow for exploring and maintaining FAT disk images on modern Windows systems.
+NetImage is actively evolving. The tagged `v1.0` release covers the core browsing and modification
+workflow, and the current `main` branch adds newer convenience features such as creating blank images
+and editing text files directly inside the disk image.
