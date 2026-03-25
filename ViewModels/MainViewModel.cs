@@ -4,6 +4,7 @@ using NetImage.Utils;
 using NetImage.Views;
 using NetImage.Workers;
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
@@ -106,10 +107,49 @@ namespace NetImage.ViewModels
                 OnPropertyChanged();
                 DeleteCommand.Enabled = value != null;
                 ExtractCommand.Enabled = value != null;
-                // Edit is only enabled when a file (not folder) is selected
-                EditCommand.Enabled = value != null && !value.IsFolder;
+                // Edit is only enabled when a non-binary file is selected
+                EditCommand.Enabled = value != null && !value.IsFolder && !IsBinaryFile(value.Name);
             }
         }
+
+        /// <summary>
+        /// Returns true if the file has a known binary extension.
+        /// Based on common DOS/Windows binary file types from the DOS era and beyond.
+        /// </summary>
+        private static bool IsBinaryFile(string fileName)
+        {
+            var extension = System.IO.Path.GetExtension(fileName).ToUpperInvariant();
+            return BinaryExtensions.Contains(extension);
+        }
+
+        // Known binary file extensions (DOS era and common Windows formats)
+        private static readonly HashSet<string> BinaryExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            // Executables
+            ".COM", ".EXE", ".PIF", ".SCR", ".DRV", ".DLL",
+            // Archives
+            ".ZIP", ".ARC", ".LZH", ".LHA", ".ARJ", ".CAB", ".TAR", ".GZ", ".BZ2",
+            // Disk images
+            ".IMG", ".IMA", ".ISO", ".BIN", ".FDI", ".DD",
+            // Compiled code / object files
+            ".OBJ", ".O", ".LIB", ".A",
+            // Bitmapped images
+            ".BMP", ".GIF", ".JPG", ".JPEG", ".PNG", ".TIF", ".TIFF", ".ICO", ".CUR", ".PCX", ".TGA",
+            // Audio/video
+            ".WAV", ".MP3", ".WMA", ".AVI", ".MPG", ".MPEG", ".MOV", ".RM", ".ASF",
+            // Fonts
+            ".FON", ".TTF", ".OTF", ".FNT",
+            // Database / data files
+            ".DBF", ".MDB", ".ACCDB",
+            // Microsoft Office (pre-2007 binary formats)
+            ".DOC", ".XLS", ".PPT",
+            // Compiled HTML
+            ".CHM",
+            // Cabinet / compressed
+            ".CAB", ".Z",
+            // Other binary
+            ".PRN", ".PS", ".PCL", ".EOT", ".CAB"
+        };
 
         private void ExecuteNew(object? parameter)
         {
