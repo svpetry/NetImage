@@ -42,6 +42,7 @@ namespace NetImage.ViewModels
             CreateFolderCommand = new ActionCommand(ExecuteCreateFolder) { Enabled = false };
             DeleteCommand = new ActionCommand(ExecuteDelete) { Enabled = false };
             ExtractCommand = new ActionCommand(ExecuteExtract) { Enabled = false };
+            EditCommand = new ActionCommand(ExecuteEdit) { Enabled = false };
             SaveCommand = new ActionCommand(ExecuteSave) { Enabled = false };
             SaveAsCommand = new ActionCommand(ExecuteSaveAs) { Enabled = false };
             TreeItems = new ObservableCollection<TreeItem>();
@@ -55,6 +56,7 @@ namespace NetImage.ViewModels
         public ActionCommand CreateFolderCommand { get; }
         public ActionCommand DeleteCommand { get; }
         public ActionCommand ExtractCommand { get; }
+        public ActionCommand EditCommand { get; }
         public ActionCommand SaveCommand { get; }
         public ActionCommand SaveAsCommand { get; }
         public string WindowTitle => $"{ApplicationName} {GetApplicationVersion()}";
@@ -101,6 +103,8 @@ namespace NetImage.ViewModels
                 OnPropertyChanged();
                 DeleteCommand.Enabled = value != null;
                 ExtractCommand.Enabled = value != null;
+                // Edit is only enabled when a file (not folder) is selected
+                EditCommand.Enabled = value != null && !value.IsFolder;
             }
         }
 
@@ -216,6 +220,7 @@ namespace NetImage.ViewModels
             CreateFolderCommand.Enabled = false;
             DeleteCommand.Enabled = false;
             ExtractCommand.Enabled = false;
+            EditCommand.Enabled = false;
             SaveCommand.Enabled = false;
             SaveAsCommand.Enabled = false;
             CurrentFolder = null;
@@ -452,6 +457,42 @@ namespace NetImage.ViewModels
                         ExtractError?.Invoke(this, $"Failed to save extracted file:\n{ex.Message}");
                     }
                 }
+            }
+        }
+
+        private void ExecuteEdit(object? parameter)
+        {
+            if (_imageWorker == null || _selectedItem == null)
+                return;
+
+            var item = _selectedItem;
+
+            // Get file content
+            var content = _imageWorker.GetFileContent(item.Path);
+            if (content == null)
+            {
+                StatusText = $"Could not read '{item.Name}'. File not found or read error.";
+                return;
+            }
+
+            // Open edit dialog
+            var dialog = new FileEditDialog();
+            dialog.Owner = System.Windows.Application.Current.MainWindow;
+            dialog.SetFileContent(item.Name, content);
+
+            if (dialog.ShowDialog() != true || dialog.EditedContent == null)
+                return;
+
+            try
+            {
+                _imageWorker.UpdateFile(item.Path, dialog.EditedContent);
+                BuildTreeView();
+                RefreshDiskSpaceText();
+                StatusText = $"Saved changes to '{item.Name}'";
+            }
+            catch (Exception ex)
+            {
+                StatusText = $"Failed to save file: {ex.Message}";
             }
         }
 

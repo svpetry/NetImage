@@ -786,6 +786,102 @@ namespace NetImage.Workers
             ParseFatFilesystem();
         }
 
+        /// <summary>
+        /// Updates the content of an existing file in the disk image.
+        /// </summary>
+        /// <param name="path">Full path to the file inside the image.</param>
+        /// <param name="content">New raw file bytes to write.</param>
+        public void UpdateFile(string path, byte[] content)
+        {
+            if (_imageData == null || !_isLoaded)
+                throw new InvalidOperationException("Image must be opened before updating files.");
+
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData!, (int)partitionByteOffset, 512));
+
+            var lastSlash = path.LastIndexOf('\\');
+            var targetDirectory = lastSlash >= 0 ? path.Substring(0, lastSlash) : string.Empty;
+            var fileName = lastSlash >= 0 ? path.Substring(lastSlash + 1) : path;
+
+            if (!TryResolveDirectory(targetDirectory, bpb, out var currentDirectory))
+                throw new InvalidOperationException($"Directory '{targetDirectory}' not found on the disk image.");
+
+            // Find existing file entry and get its first cluster to free later
+            uint oldFirstCluster = 0;
+            uint oldFileSize = 0;
+            foreach (var offset in EnumerateDirectoryEntryOffsets(currentDirectory, bpb))
+            {
+                var entry = new ReadOnlySpan<byte>(_imageData!, offset, 32);
+                var firstByte = entry[0];
+                if (firstByte == 0x00)
+                    break;
+
+                if (firstByte == 0xE5 || (firstByte >= 0x05 && firstByte <= 0x0A) || (firstByte >= 0xE5 && firstByte <= 0xEA))
+                    continue;
+
+                var entryName = DecodeEntryName(entry);
+                if (entryName == "." || entryName == "..") continue;
+                if ((entry[11] & 0x08) != 0) continue; // volume label
+                if (IsDirectoryEntry(entry)) continue;
+
+                if (entryName.Equals(fileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    oldFirstCluster = GetFirstCluster(entry);
+                    oldFileSize = BitConverter.ToUInt32(entry.Slice(28, 4));
+                    break;
+                }
+            }
+
+            if (oldFirstCluster == 0)
+                throw new InvalidOperationException($"File '{fileName}' not found.");
+
+            // Free the old cluster chain
+            FreeClusterChain(oldFirstCluster, bpb);
+
+            // Allocate new cluster chain for updated content
+            var newFirstCluster = AllocateClusterChain(content.Length, bpb);
+
+            // Write new file content to allocated clusters
+            WriteFileToCluster(newFirstCluster, content, bpb);
+
+            // Update the directory entry with new size and first cluster
+            foreach (var offset in EnumerateDirectoryEntryOffsets(currentDirectory, bpb))
+            {
+                var entry = new ReadOnlySpan<byte>(_imageData!, offset, 32);
+                var firstByte = entry[0];
+                if (firstByte == 0x00)
+                    break;
+
+                if (firstByte == 0xE5 || (firstByte >= 0x05 && firstByte <= 0x0A) || (firstByte >= 0xE5 && firstByte <= 0xEA))
+                    continue;
+
+                var entryName = DecodeEntryName(entry);
+                if (entryName == "." || entryName == "..") continue;
+                if ((entry[11] & 0x08) != 0) continue; // volume label
+                if (IsDirectoryEntry(entry)) continue;
+
+                if (entryName.Equals(fileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Update file size (offset 28, 4 bytes little-endian)
+                    var sizeBytes = BitConverter.GetBytes((uint)content.Length);
+                    for (int i = 0; i < 4; i++)
+                        _imageData![offset + 28 + i] = sizeBytes[i];
+
+                    // Update first cluster (offset 20, 2 bytes + offset 24, 2 bytes little-endian)
+                    var clusterLow = (ushort)(newFirstCluster & 0xFFFF);
+                    var clusterHigh = (ushort)((newFirstCluster >> 16) & 0xFFFF);
+                    for (int i = 0; i < 2; i++)
+                        _imageData![offset + 20 + i] = BitConverter.GetBytes(clusterLow)[i];
+                    for (int i = 0; i < 2; i++)
+                        _imageData![offset + 24 + i] = BitConverter.GetBytes(clusterHigh)[i];
+
+                    break;
+                }
+            }
+
+            ParseFatFilesystem();
+        }
+
         private void AddFileInternal(string targetDirectory, string fileName, byte[] content)
         {
             var partitionByteOffset = _partitionStartSector * 512;
