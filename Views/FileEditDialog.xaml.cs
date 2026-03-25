@@ -7,16 +7,21 @@ namespace NetImage.Views
     {
         private Encoding _encoding = Encoding.GetEncoding("IBM437") ?? Encoding.ASCII;
         public string FileName { get; private set; } = string.Empty;
+        public long? FileSize { get; private set; }
+        public DateTime? ModifiedTime { get; private set; }
         public byte[]? EditedContent { get; private set; }
 
         public FileEditDialog()
         {
             InitializeComponent();
+            DataContext = this;
         }
 
-        public void SetFileContent(string fileName, byte[] content)
+        public void SetFileContent(string fileName, byte[] content, long? fileSize = null, DateTime? modifiedTime = null)
         {
             FileName = fileName;
+            FileSize = fileSize;
+            ModifiedTime = modifiedTime;
 
             try
             {

@@ -10,8 +10,15 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- File name label -->
-        <TextBlock Grid.Row="0" Text="{Binding FileName}" FontWeight="Bold" Margin="0,0,0,10"/>
+        <!-- File info header -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,10">
+            <TextBlock Text="{Binding FileName}" FontWeight="Bold" FontSize="14"/>
+            <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                <TextBlock Text="{Binding FileSize, StringFormat='Size: {0:N0} bytes'}" Foreground="Gray"/>
+                <TextBlock Text=" | " Foreground="Gray" Margin="10,0"/>
+                <TextBlock Text="{Binding ModifiedTime, StringFormat='Modified: {0:g}'}" Foreground="Gray"/>
+            </StackPanel>
+        </StackPanel>
 
         <!-- Text area for editing -->
         <TextBox Grid.Row="1"

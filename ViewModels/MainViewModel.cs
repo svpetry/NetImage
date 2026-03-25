@@ -153,7 +153,7 @@ namespace NetImage.ViewModels
             // Database / data files
             ".DBF", ".MDB", ".ACCDB",
             // Microsoft Office (pre-2007 binary formats)
-            ".DOC", ".XLS", ".PPT",
+            ".XLS", ".PPT",
             // Compiled HTML
             ".CHM",
             // Cabinet / compressed
@@ -532,7 +532,7 @@ namespace NetImage.ViewModels
             // Open edit dialog
             var dialog = new FileEditDialog();
             dialog.Owner = System.Windows.Application.Current.MainWindow;
-            dialog.SetFileContent(item.Name, content);
+            dialog.SetFileContent(item.Name, content, item.Size, item.Modified);
 
             if (dialog.ShowDialog() != true || dialog.EditedContent == null)
                 return;
