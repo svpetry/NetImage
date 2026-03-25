@@ -17,6 +17,7 @@
     <Compile Remove="NetImage.Tests\**" />
     <EmbeddedResource Remove="NetImage.Tests\**" />
     <None Remove="NetImage.Tests\**" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="10.0.5" />
     <Resource Include="diskette.ico" />
   </ItemGroup>
 

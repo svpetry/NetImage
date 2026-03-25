@@ -1,15 +1,16 @@
+using Microsoft.Win32;
+using NetImage.Models;
+using NetImage.Utils;
+using NetImage.Views;
+using NetImage.Workers;
 using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading.Tasks;
-using Microsoft.Win32;
-using NetImage.Models;
-using NetImage.Utils;
-using NetImage.Views;
-using NetImage.Workers;
 
 namespace NetImage.ViewModels
 {
@@ -46,6 +47,8 @@ namespace NetImage.ViewModels
             SaveCommand = new ActionCommand(ExecuteSave) { Enabled = false };
             SaveAsCommand = new ActionCommand(ExecuteSaveAs) { Enabled = false };
             TreeItems = new ObservableCollection<TreeItem>();
+
+            System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         }
 
         public ActionCommand NewCommand { get; }

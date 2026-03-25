@@ -5,6 +5,7 @@ namespace NetImage.Views
 {
     public partial class FileEditDialog : Window
     {
+        private Encoding _encoding = Encoding.GetEncoding("IBM437") ?? Encoding.ASCII;
         public string FileName { get; private set; } = string.Empty;
         public byte[]? EditedContent { get; private set; }
 
@@ -19,7 +20,7 @@ namespace NetImage.Views
 
             try
             {
-                EditTextBox.Text = Encoding.ASCII.GetString(content);
+                EditTextBox.Text = _encoding.GetString(content);
             }
             catch
             {
@@ -31,7 +32,7 @@ namespace NetImage.Views
         {
             try
             {
-                EditedContent = Encoding.ASCII.GetBytes(EditTextBox.Text);
+                EditedContent = _encoding.GetBytes(EditTextBox.Text);
                 DialogResult = true;
                 Close();
             }
