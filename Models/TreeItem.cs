@@ -5,6 +5,14 @@ using System.Runtime.CompilerServices;
 
 namespace NetImage.Models
 {
+    /// <summary>Segoe Fluent Icons glyph codes.</summary>
+    internal static class IconGlyphs
+    {
+        public const string Drive = "\xEDA2";      // Hard drive icon
+        public const string Folder = "\xE8B7";     // Folder icon
+        public const string File = "\xE7C3";       // Document/file icon
+    }
+
     public class TreeItem : INotifyPropertyChanged
     {
         private bool _isExpanded;
@@ -45,7 +53,7 @@ namespace NetImage.Models
 
         public bool IsFolder => Size == null;
 
-        public string IconGlyph => IsFolder ? "\xE8B7" : "\xE7C3";
+        public string IconGlyph => Path == "" ? IconGlyphs.Drive : (IsFolder ? IconGlyphs.Folder : IconGlyphs.File);
 
         public ObservableCollection<TreeItem> Children { get; }
         
