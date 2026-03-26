@@ -197,13 +197,20 @@ namespace NetImage.ViewModels
 
             if (openFileDialog.ShowDialog() == true)
             {
-                ClearDiskSpaceText();
-                _imageWorker = new DiskImageWorker(openFileDialog.FileName);
-                _imageWorker.LoadingStarted += OnLoadingStarted;
-                _imageWorker.LoadingCompleted += OnLoadingCompleted;
+                var worker = new DiskImageWorker(openFileDialog.FileName);
+                worker.LoadingStarted += OnLoadingStarted;
+                worker.LoadingCompleted += OnLoadingCompleted;
 
-                await _imageWorker.OpenAsync();
+                await worker.OpenAsync();
+                if (!worker.IsLoaded)
+                {
+                    StatusText = worker.FilesystemType == DiskImageWorker.FatType.Fat32
+                        ? "FAT32 images are not supported"
+                        : $"Could not open image: {openFileDialog.FileName}";
+                    return;
+                }
 
+                _imageWorker = worker;
                 BuildTreeView();
                 RefreshDiskSpaceText();
                 CloseCommand.Enabled = true;

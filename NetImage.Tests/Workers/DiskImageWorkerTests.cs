@@ -139,6 +139,25 @@ namespace NetImage.Tests.Workers
         }
 
         [Test]
+        public async Task OpenAsync_WithFat32Image_DoesNotMarkWorkerAsLoaded()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "fat32.img");
+            var imageData = CreateFat32BootSectorImage();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            await worker.OpenAsync();
+
+            // Assert
+            Assert.That(worker.IsLoaded, Is.False);
+            Assert.That(worker.FilesystemType, Is.EqualTo(DiskImageWorker.FatType.Fat32));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Is.Empty);
+        }
+
+        [Test]
         public async Task OpenAsync_WithFileSmallerThanSector_DoesNotCrash()
         {
             // Arrange
@@ -186,6 +205,32 @@ namespace NetImage.Tests.Workers
             Assert.That(image.Length, Is.GreaterThanOrEqualTo(512));
             Assert.That(image[510], Is.EqualTo(0x55));
             Assert.That(image[511], Is.EqualTo(0xAA));
+        }
+
+        [Test]
+        public async Task CreateBlankImage_InitializesFat12ReservedEntriesCorrectly()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "blank.img");
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            worker.CreateBlankImage(1474560, "DISK");
+            await worker.SaveAsync(filePath);
+
+            // Assert
+            var image = await File.ReadAllBytesAsync(filePath);
+            var reservedSectors = BitConverter.ToUInt16(image, 14);
+            var sectorsPerFat = BitConverter.ToUInt16(image, 22);
+            var fat1Offset = reservedSectors * SectorSize;
+            var fat2Offset = fat1Offset + (sectorsPerFat * SectorSize);
+
+            Assert.That(image[fat1Offset], Is.EqualTo(0xF8));
+            Assert.That(image[fat1Offset + 1], Is.EqualTo(0xFF));
+            Assert.That(image[fat1Offset + 2], Is.EqualTo(0xFF));
+            Assert.That(image[fat2Offset], Is.EqualTo(0xF8));
+            Assert.That(image[fat2Offset + 1], Is.EqualTo(0xFF));
+            Assert.That(image[fat2Offset + 2], Is.EqualTo(0xFF));
         }
 
         #endregion
@@ -657,6 +702,76 @@ namespace NetImage.Tests.Workers
 
             // Create file in subdirectory
             CreateDirectoryEntry(image, subDirStart + 64, "NESTED.TXT", isDirectory: false);
+
+            return image;
+        }
+
+        private byte[] CreateFatImageWithFullRootDirectory()
+        {
+            var image = CreateMinimalFatImage();
+            var rootDirStart = 9 * SectorSize;
+
+            for (int i = 0; i < 4096; i++)
+            {
+                CreateDirectoryEntry(image, rootDirStart + (i * 32), $"F{i:000}.TXT", isDirectory: false);
+            }
+
+            return image;
+        }
+
+        private byte[] CreateFatImageWithZeroLengthFile(string fileName)
+        {
+            var image = CreateMinimalFatImage();
+            var rootDirStart = 9 * SectorSize;
+
+            CreateDirectoryEntry(image, rootDirStart, fileName, isDirectory: false);
+            image[rootDirStart + 26] = 0x00;
+            image[rootDirStart + 27] = 0x00;
+            image[rootDirStart + 28] = 0x00;
+            image[rootDirStart + 29] = 0x00;
+            image[rootDirStart + 30] = 0x00;
+            image[rootDirStart + 31] = 0x00;
+
+            return image;
+        }
+
+        private byte[] CreateFat32BootSectorImage()
+        {
+            var image = new byte[SectorSize];
+
+            image[0] = 0xEB;
+            image[1] = 0x58;
+            image[2] = 0x90;
+            Array.Copy(Encoding.ASCII.GetBytes("MSWIN4.1"), 0, image, 3, 8);
+
+            image[11] = 0x00;
+            image[12] = 0x02;
+            image[13] = 0x01;
+            image[14] = 0x20;
+            image[15] = 0x00;
+            image[16] = 0x02;
+            image[17] = 0x00;
+            image[18] = 0x00;
+            image[19] = 0x00;
+            image[20] = 0x00;
+            image[21] = 0xF8;
+            image[22] = 0x00;
+            image[23] = 0x00;
+            image[24] = 0x3F;
+            image[25] = 0x00;
+            image[26] = 0xFF;
+            image[27] = 0x00;
+            image[32] = 0x70;
+            image[33] = 0x11;
+            image[34] = 0x01;
+            image[35] = 0x00;
+            image[36] = 0x00;
+            image[37] = 0x01;
+            image[38] = 0x00;
+            image[39] = 0x00;
+            image[44] = 0x02;
+            image[510] = 0x55;
+            image[511] = 0xAA;
 
             return image;
         }
@@ -1178,6 +1293,135 @@ namespace NetImage.Tests.Workers
             Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("NOEXT"));
         }
 
+        [Test]
+        public async Task AddFile_WithContentSpanningMultipleClusters_PreservesAllBytes()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "multicluster.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+            var fileContent = Enumerable.Range(0, 700).Select(i => (byte)(i % 251)).ToArray();
+
+            // Act
+            worker.AddFile("BIG.BIN", fileContent);
+            await worker.SaveAsync(filePath);
+
+            // Assert
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            var roundTrip = newWorker.GetFileContent("BIG.BIN");
+            Assert.That(roundTrip, Is.EqualTo(fileContent));
+        }
+
+        [Test]
+        public async Task CreateFolder_WhenDirectoryIsFull_DoesNotConsumeFreeSpace()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "full-root.img");
+            var imageData = CreateFatImageWithFullRootDirectory();
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+            var freeBytesBefore = worker.GetFreeBytes();
+
+            // Act / Assert
+            Assert.Throws<InvalidOperationException>(() => worker.CreateFolder(string.Empty, "EXTRA"));
+            Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBytesBefore));
+        }
+
+        #endregion
+
+        [Test]
+        public async Task AddHostDirectory_AfterDeleteSaveReopen_ReaddsDirectoryThatNeedsMultipleClusters()
+        {
+            // Arrange
+            var imagePath = Path.Combine(_tempDirectory!, "readd-large-dir.img");
+            var hostFolderPath = Path.Combine(_tempDirectory!, "BIGDIR");
+            Directory.CreateDirectory(hostFolderPath);
+
+            for (var i = 0; i < 20; i++)
+            {
+                File.WriteAllBytes(Path.Combine(hostFolderPath, $"F{i:00}.TXT"), new byte[] { (byte)i });
+            }
+
+            var subFolderPath = Path.Combine(hostFolderPath, "SUB");
+            Directory.CreateDirectory(subFolderPath);
+            var innerContent = Encoding.ASCII.GetBytes("INNER");
+            File.WriteAllBytes(Path.Combine(subFolderPath, "INNER.TXT"), innerContent);
+
+            var worker = new DiskImageWorker(imagePath);
+            worker.CreateBlankImage(1474560, "DISK");
+            worker.AddHostDirectory(string.Empty, hostFolderPath);
+            await worker.SaveAsync(imagePath);
+
+            // Act
+            worker.DeleteEntry("BIGDIR");
+            await worker.SaveAsync(imagePath);
+
+            var reopenedWorker = new DiskImageWorker(imagePath);
+            await reopenedWorker.OpenAsync();
+            reopenedWorker.AddHostDirectory(string.Empty, hostFolderPath);
+            await reopenedWorker.SaveAsync(imagePath);
+
+            // Assert
+            var verifiedWorker = new DiskImageWorker(imagePath);
+            await verifiedWorker.OpenAsync();
+            var paths = verifiedWorker.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.That(paths, Does.Contain("BIGDIR"));
+            Assert.That(paths, Does.Contain("BIGDIR\\SUB"));
+            Assert.That(paths, Does.Contain("BIGDIR\\SUB\\INNER.TXT"));
+            Assert.That(paths, Does.Contain("BIGDIR\\F19.TXT"));
+            Assert.That(verifiedWorker.GetFileContent("BIGDIR\\F19.TXT"), Is.EqualTo(new byte[] { 19 }));
+            Assert.That(verifiedWorker.GetFileContent("BIGDIR\\SUB\\INNER.TXT"), Is.EqualTo(innerContent));
+        }
+
+        #region UpdateFile Tests
+
+        [Test]
+        public async Task UpdateFile_WithZeroLengthFile_WritesNewClusterAndContent()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "update-zero.img");
+            var imageData = CreateFatImageWithZeroLengthFile("EMPTY.TXT");
+            File.WriteAllBytes(filePath, imageData);
+
+            var worker = new DiskImageWorker(filePath);
+            await worker.OpenAsync();
+            var updatedContent = Encoding.ASCII.GetBytes("UPDATED");
+
+            // Act
+            worker.UpdateFile("EMPTY.TXT", updatedContent);
+            await worker.SaveAsync(filePath);
+
+            // Assert
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.GetFileContent("EMPTY.TXT"), Is.EqualTo(updatedContent));
+        }
+
+        [Test]
+        public void UpdateFile_WhenExpansionFails_PreservesOriginalContent()
+        {
+            // Arrange
+            var worker = new DiskImageWorker("dummy.img");
+            worker.CreateBlankImage(163840, "DISK");
+
+            var originalContent = Encoding.ASCII.GetBytes("ORIGINAL");
+            worker.AddFile("TARGET.TXT", originalContent);
+
+            var fillerSize = (int)worker.GetFreeBytes() - SectorSize;
+            worker.AddFile("FILLER.BIN", new byte[fillerSize]);
+            var freeBytesBeforeUpdate = worker.GetFreeBytes();
+
+            // Act / Assert
+            Assert.That(freeBytesBeforeUpdate, Is.EqualTo(SectorSize));
+            Assert.Throws<InvalidOperationException>(() => worker.UpdateFile("TARGET.TXT", new byte[1025]));
+            Assert.That(worker.GetFileContent("TARGET.TXT"), Is.EqualTo(originalContent));
+            Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBytesBeforeUpdate));
+        }
+
         #endregion
 
         #region Delete Tests
@@ -1251,6 +1495,28 @@ namespace NetImage.Tests.Workers
             var newWorker = new DiskImageWorker(filePath);
             await newWorker.OpenAsync();
             Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain("TESTFILE.TXT"));
+        }
+
+        [Test]
+        public void DeleteEntry_WithNestedDirectory_FreesAllClustersInTree()
+        {
+            // Arrange
+            var worker = new DiskImageWorker("dummy.img");
+            worker.CreateBlankImage(1474560, "DISK");
+            var freeBytesBefore = worker.GetFreeBytes();
+
+            worker.CreateFolder(string.Empty, "TOP");
+            worker.CreateFolder("TOP", "SUB");
+            worker.AddFile("TOP\\SUB", "FILE.BIN", Enumerable.Range(0, 600).Select(i => (byte)(i % 251)).ToArray());
+
+            // Act
+            worker.DeleteEntry("TOP");
+
+            // Assert
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain("TOP"));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain("TOP\\SUB"));
+            Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain("TOP\\SUB\\FILE.BIN"));
+            Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBytesBefore));
         }
 
         #endregion
