@@ -54,7 +54,7 @@ NetImage is already very capable for classic DOS-era image workflows, but a few 
 
 ## Download
 
-The latest tagged release is [v1.1](https://github.com/svpetry/NetImage/releases/tag/v1.1).
+The latest tagged release is [v1.2](https://github.com/svpetry/NetImage/releases/tag/v1.2).
 
 Build from source if you want the latest in-progress changes from the `main` branch.
 
@@ -123,6 +123,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Publish-Release.ps1 -UploadTo
 
 ## Status
 
-NetImage is actively evolving. The tagged `v1.1` release covers the current browsing, modification,
+NetImage is actively evolving. The tagged `v1.2` release covers the current browsing, modification,
 blank-image creation, and text-editing workflow, and the `main` branch may include newer work in
 progress.
