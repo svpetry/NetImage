@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 namespace NetImage.Workers
 {
     public record FileEntry(string Path, long? Size, DateTime? Modified);
+    public readonly record struct OperationProgress(long ProcessedBytes, long TotalBytes, string CurrentItem);
 
     public class DiskImageWorker
     {
@@ -678,6 +679,12 @@ namespace NetImage.Workers
         }
 
         public void ExtractFolder(string sourcePath, string hostDestinationPath)
+            => ExtractFolderInternal(sourcePath, hostDestinationPath, null);
+
+        public Task ExtractFolderAsync(string sourcePath, string hostDestinationPath, IProgress<OperationProgress>? progress = null)
+            => Task.Run(() => ExtractFolderInternal(sourcePath, hostDestinationPath, progress));
+
+        private void ExtractFolderInternal(string sourcePath, string hostDestinationPath, IProgress<OperationProgress>? progress)
         {
             if (_imageData == null || !_isLoaded)
                 throw new InvalidOperationException("Image must be opened before extracting.");
@@ -685,41 +692,49 @@ namespace NetImage.Workers
             System.IO.Directory.CreateDirectory(hostDestinationPath);
 
             var prefix = string.IsNullOrEmpty(sourcePath) ? string.Empty : sourcePath + "\\";
+            var entriesToExtract = FilesAndFolders
+                .Where(entry => string.IsNullOrEmpty(sourcePath) || !entry.Path.Equals(sourcePath, StringComparison.OrdinalIgnoreCase))
+                .Where(entry => string.IsNullOrEmpty(prefix) || entry.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Select(entry => (
+                    Entry: entry,
+                    RelativePath: string.IsNullOrEmpty(prefix) ? entry.Path : entry.Path.Substring(prefix.Length)))
+                .Where(item => !string.IsNullOrEmpty(item.RelativePath))
+                .ToList();
+            var totalBytes = entriesToExtract.Sum(item => item.Entry.Size ?? 0L);
+            var extractedBytes = 0L;
 
-            foreach (var entry in FilesAndFolders)
+            progress?.Report(new OperationProgress(0, totalBytes, string.Empty));
+
+            foreach (var item in entriesToExtract)
             {
-                if (!string.IsNullOrEmpty(sourcePath) && entry.Path.Equals(sourcePath, StringComparison.OrdinalIgnoreCase))
+                var entry = item.Entry;
+                var destFullPath = System.IO.Path.Combine(hostDestinationPath, item.RelativePath);
+
+                if (entry.Size == null)
                 {
+                    System.IO.Directory.CreateDirectory(destFullPath);
                     continue;
                 }
 
-                if (string.IsNullOrEmpty(prefix) || entry.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                progress?.Report(new OperationProgress(extractedBytes, totalBytes, item.RelativePath));
+
+                var content = GetFileContent(entry.Path);
+                if (content != null)
                 {
-                    var relativePath = string.IsNullOrEmpty(prefix) ? entry.Path : entry.Path.Substring(prefix.Length);
-                    var destFullPath = System.IO.Path.Combine(hostDestinationPath, relativePath);
+                    var parentDir = System.IO.Path.GetDirectoryName(destFullPath);
+                    if (parentDir != null && !System.IO.Directory.Exists(parentDir))
+                        System.IO.Directory.CreateDirectory(parentDir);
 
-                    if (entry.Size == null)
+                    System.IO.File.WriteAllBytes(destFullPath, content);
+
+                    if (entry.Modified.HasValue)
                     {
-                        System.IO.Directory.CreateDirectory(destFullPath);
-                    }
-                    else
-                    {
-                        var content = GetFileContent(entry.Path);
-                        if (content != null)
-                        {
-                            var parentDir = System.IO.Path.GetDirectoryName(destFullPath);
-                            if (parentDir != null && !System.IO.Directory.Exists(parentDir))
-                                System.IO.Directory.CreateDirectory(parentDir);
-
-                            System.IO.File.WriteAllBytes(destFullPath, content);
-
-                            if (entry.Modified.HasValue)
-                            {
-                                System.IO.File.SetLastWriteTime(destFullPath, entry.Modified.Value);
-                            }
-                        }
+                        System.IO.File.SetLastWriteTime(destFullPath, entry.Modified.Value);
                     }
                 }
+
+                extractedBytes += entry.Size ?? 0L;
+                progress?.Report(new OperationProgress(extractedBytes, totalBytes, item.RelativePath));
             }
         }
 
@@ -1067,11 +1082,23 @@ namespace NetImage.Workers
             if (_imageData == null || !_isLoaded)
                 throw new InvalidOperationException("Image must be opened before adding folders.");
 
-            AddHostDirectoryRecursive(targetDirectory, hostFolderPath);
+            AddHostDirectoryRecursive(targetDirectory, hostFolderPath, null);
             ParseFatFilesystem();
         }
 
-        private void AddHostDirectoryRecursive(string targetDirectory, string hostFolderPath)
+        public Task AddHostDirectoryAsync(string targetDirectory, string hostFolderPath, long totalBytes, IProgress<OperationProgress>? progress = null)
+            => Task.Run(() =>
+            {
+                if (_imageData == null || !_isLoaded)
+                    throw new InvalidOperationException("Image must be opened before adding folders.");
+
+                var progressTracker = new OperationProgressTracker(hostFolderPath, totalBytes, progress);
+                AddHostDirectoryRecursive(targetDirectory, hostFolderPath, progressTracker);
+                ParseFatFilesystem();
+                progressTracker.ReportCompleted();
+            });
+
+        private void AddHostDirectoryRecursive(string targetDirectory, string hostFolderPath, OperationProgressTracker? progressTracker)
         {
             var dirInfo = new DirectoryInfo(hostFolderPath);
 
@@ -1081,13 +1108,15 @@ namespace NetImage.Workers
 
             foreach (var file in dirInfo.GetFiles())
             {
+                progressTracker?.ReportCurrent(file.FullName);
                 var content = File.ReadAllBytes(file.FullName);
                 AddFileInternal(newTargetDir, file.Name, content);
+                progressTracker?.Advance(file.Length, file.FullName);
             }
 
             foreach (var subDir in dirInfo.GetDirectories())
             {
-                AddHostDirectoryRecursive(newTargetDir, subDir.FullName);
+                AddHostDirectoryRecursive(newTargetDir, subDir.FullName, progressTracker);
             }
         }
 
@@ -1776,6 +1805,30 @@ namespace NetImage.Workers
             entry[11] = 0x08;
 
             // Remaining fields are zeroed (reserved, time, date, clusters, size)
+        }
+
+        private sealed class OperationProgressTracker(string rootFolderPath, long totalBytes, IProgress<OperationProgress>? progress)
+        {
+            private readonly string _rootFolderPath = rootFolderPath;
+            private readonly long _totalBytes = totalBytes;
+            private readonly IProgress<OperationProgress>? _progress = progress;
+            private long _processedBytes;
+
+            public void ReportCurrent(string filePath)
+            {
+                _progress?.Report(new OperationProgress(_processedBytes, _totalBytes, Path.GetRelativePath(_rootFolderPath, filePath)));
+            }
+
+            public void Advance(long fileSize, string filePath)
+            {
+                _processedBytes = Math.Min(_processedBytes + fileSize, _totalBytes);
+                _progress?.Report(new OperationProgress(_processedBytes, _totalBytes, Path.GetRelativePath(_rootFolderPath, filePath)));
+            }
+
+            public void ReportCompleted()
+            {
+                _progress?.Report(new OperationProgress(_totalBytes, _totalBytes, string.Empty));
+            }
         }
     }
 }

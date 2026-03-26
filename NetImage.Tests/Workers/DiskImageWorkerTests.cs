@@ -1377,6 +1377,80 @@ namespace NetImage.Tests.Workers
             Assert.That(verifiedWorker.GetFileContent("BIGDIR\\SUB\\INNER.TXT"), Is.EqualTo(innerContent));
         }
 
+        [Test]
+        public async Task AddHostDirectoryAsync_ReportsProgressAndAddsContents()
+        {
+            // Arrange
+            var worker = new DiskImageWorker("dummy.img");
+            worker.CreateBlankImage(1474560, "DISK");
+
+            var hostFolderPath = Path.Combine(_tempDirectory!, "ASYNCADD");
+            Directory.CreateDirectory(hostFolderPath);
+            var nestedFolderPath = Path.Combine(hostFolderPath, "SUB");
+            Directory.CreateDirectory(nestedFolderPath);
+
+            var firstContent = Encoding.ASCII.GetBytes("FIRST");
+            var secondContent = Encoding.ASCII.GetBytes("SECOND!");
+            File.WriteAllBytes(Path.Combine(hostFolderPath, "ONE.TXT"), firstContent);
+            File.WriteAllBytes(Path.Combine(nestedFolderPath, "TWO.TXT"), secondContent);
+
+            var totalBytes = firstContent.Length + secondContent.Length;
+            var progressUpdates = new List<OperationProgress>();
+
+            // Act
+            await worker.AddHostDirectoryAsync(
+                string.Empty,
+                hostFolderPath,
+                totalBytes,
+                new InlineProgress<OperationProgress>(progressUpdates.Add));
+
+            // Assert
+            var paths = worker.FilesAndFolders.Select(f => f.Path).ToList();
+            Assert.That(paths, Does.Contain("ASYNCADD"));
+            Assert.That(paths, Does.Contain("ASYNCADD\\ONE.TXT"));
+            Assert.That(paths, Does.Contain("ASYNCADD\\SUB"));
+            Assert.That(paths, Does.Contain("ASYNCADD\\SUB\\TWO.TXT"));
+            Assert.That(progressUpdates, Is.Not.Empty);
+            Assert.That(progressUpdates[^1].ProcessedBytes, Is.EqualTo(totalBytes));
+            Assert.That(progressUpdates[^1].TotalBytes, Is.EqualTo(totalBytes));
+            Assert.That(progressUpdates.Any(update => update.CurrentItem == "ONE.TXT"), Is.True);
+            Assert.That(progressUpdates.Any(update => update.CurrentItem == Path.Combine("SUB", "TWO.TXT")), Is.True);
+        }
+
+        [Test]
+        public async Task ExtractFolderAsync_ReportsProgressAndWritesFiles()
+        {
+            // Arrange
+            var worker = new DiskImageWorker("dummy.img");
+            worker.CreateBlankImage(1474560, "DISK");
+            worker.CreateFolder(string.Empty, "EXPORT");
+
+            var rootContent = Encoding.ASCII.GetBytes("ROOT");
+            var nestedContent = Encoding.ASCII.GetBytes("NESTED");
+            worker.AddFile("EXPORT", "ROOT.TXT", rootContent);
+            worker.CreateFolder("EXPORT", "SUB");
+            worker.AddFile("EXPORT\\SUB", "INNER.TXT", nestedContent);
+
+            var destinationPath = Path.Combine(_tempDirectory!, "EXTRACTED", "EXPORT");
+            var totalBytes = rootContent.Length + nestedContent.Length;
+            var progressUpdates = new List<OperationProgress>();
+
+            // Act
+            await worker.ExtractFolderAsync(
+                "EXPORT",
+                destinationPath,
+                new InlineProgress<OperationProgress>(progressUpdates.Add));
+
+            // Assert
+            Assert.That(File.ReadAllBytes(Path.Combine(destinationPath, "ROOT.TXT")), Is.EqualTo(rootContent));
+            Assert.That(File.ReadAllBytes(Path.Combine(destinationPath, "SUB", "INNER.TXT")), Is.EqualTo(nestedContent));
+            Assert.That(progressUpdates, Is.Not.Empty);
+            Assert.That(progressUpdates[^1].ProcessedBytes, Is.EqualTo(totalBytes));
+            Assert.That(progressUpdates[^1].TotalBytes, Is.EqualTo(totalBytes));
+            Assert.That(progressUpdates.Any(update => update.CurrentItem == "ROOT.TXT"), Is.True);
+            Assert.That(progressUpdates.Any(update => update.CurrentItem == Path.Combine("SUB", "INNER.TXT")), Is.True);
+        }
+
         #region UpdateFile Tests
 
         [Test]
@@ -1520,5 +1594,15 @@ namespace NetImage.Tests.Workers
         }
 
         #endregion
+
+        private sealed class InlineProgress<T>(Action<T> onReport) : IProgress<T>
+        {
+            private readonly Action<T> _onReport = onReport;
+
+            public void Report(T value)
+            {
+                _onReport(value);
+            }
+        }
     }
 }

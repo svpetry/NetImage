@@ -10,6 +10,9 @@
     <Window.DataContext>
         <vm:MainViewModel/>
     </Window.DataContext>
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+    </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -191,6 +194,18 @@
         <StatusBar Grid.Row="2">
             <StatusBarItem Padding="4,0">
                 <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center"/>
+            </StatusBarItem>
+            <StatusBarItem Padding="4,0" Visibility="{Binding IsProgressVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <StackPanel Orientation="Horizontal">
+                    <ProgressBar Width="180"
+                                 Height="14"
+                                 Minimum="0"
+                                 Maximum="100"
+                                 Value="{Binding ProgressValue, Mode=OneWay, FallbackValue=0, TargetNullValue=0}"
+                                 IsIndeterminate="{Binding IsProgressIndeterminate}"
+                                 Margin="0,0,8,0"/>
+                    <TextBlock Text="{Binding ProgressText}" VerticalAlignment="Center"/>
+                </StackPanel>
             </StatusBarItem>
             <StatusBarItem Padding="4,0" DockPanel.Dock="Right" HorizontalContentAlignment="Right">
                 <StackPanel Orientation="Horizontal">

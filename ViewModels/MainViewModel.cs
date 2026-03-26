@@ -24,6 +24,12 @@ namespace NetImage.ViewModels
         private DiskImageWorker? _imageWorker;
         private TreeItem? _currentFolder;
         private TreeItem? _selectedItem;
+        private bool _canSaveCurrentImage;
+        private bool _isBusy;
+        private bool _isProgressVisible;
+        private bool _isProgressIndeterminate;
+        private double _progressValue;
+        private string _progressText = string.Empty;
 
         public event EventHandler<string>? AddError;
 
@@ -96,6 +102,76 @@ namespace NetImage.ViewModels
             }
         }
 
+        public bool IsBusy
+        {
+            get => _isBusy;
+            private set
+            {
+                if (_isBusy == value)
+                    return;
+
+                _isBusy = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool IsProgressVisible
+        {
+            get => _isProgressVisible;
+            private set
+            {
+                if (_isProgressVisible == value)
+                    return;
+
+                _isProgressVisible = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool IsProgressIndeterminate
+        {
+            get => _isProgressIndeterminate;
+            private set
+            {
+                if (_isProgressIndeterminate == value)
+                    return;
+
+                _isProgressIndeterminate = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public double ProgressValue
+        {
+            get => _progressValue;
+            private set
+            {
+                if (double.IsNaN(value) || double.IsInfinity(value))
+                {
+                    value = 0;
+                }
+
+                if (Math.Abs(_progressValue - value) < double.Epsilon)
+                    return;
+
+                _progressValue = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public string ProgressText
+        {
+            get => _progressText;
+            private set
+            {
+                if (string.Equals(_progressText, value, StringComparison.Ordinal))
+                    return;
+
+                _progressText = value;
+                OnPropertyChanged();
+            }
+        }
+
         public ObservableCollection<TreeItem> TreeItems { get; }
 
         public TreeItem? CurrentFolder
@@ -116,10 +192,7 @@ namespace NetImage.ViewModels
             {
                 _selectedItem = value;
                 OnPropertyChanged();
-                DeleteCommand.Enabled = value != null;
-                ExtractCommand.Enabled = value != null;
-                // Edit is only enabled when a non-binary file is selected
-                EditCommand.Enabled = value != null && !value.IsFolder && !IsBinaryFile(value.Name);
+                UpdateCommandStates();
             }
         }
 
@@ -170,19 +243,12 @@ namespace NetImage.ViewModels
 
             // Create new image worker with blank FAT image
             _imageWorker = new DiskImageWorker(string.Empty);
-            _imageWorker.LoadingStarted += OnLoadingStarted;
-            _imageWorker.LoadingCompleted += OnLoadingCompleted;
-
             _imageWorker.CreateBlankImage(dialog.SelectedSize, "DISK");
+            _canSaveCurrentImage = false;
 
             BuildTreeView();
             RefreshDiskSpaceText();
-            CloseCommand.Enabled = true;
-            AddCommand.Enabled = true;
-            AddFolderCommand.Enabled = true;
-            CreateFolderCommand.Enabled = true;
-            SaveCommand.Enabled = false; // New image not saved yet
-            SaveAsCommand.Enabled = true;
+            UpdateCommandStates();
 
             var sizeKB = dialog.SelectedSize / 1024;
             StatusText = $"New {sizeKB} KB disk image created";
@@ -198,10 +264,19 @@ namespace NetImage.ViewModels
             if (openFileDialog.ShowDialog() == true)
             {
                 var worker = new DiskImageWorker(openFileDialog.FileName);
-                worker.LoadingStarted += OnLoadingStarted;
-                worker.LoadingCompleted += OnLoadingCompleted;
+                try
+                {
+                    await RunBusyOperationAsync(
+                        "Opening image...",
+                        () => Task.Run(async () => await worker.OpenAsync()),
+                        progressText: System.IO.Path.GetFileName(openFileDialog.FileName));
+                }
+                catch (Exception ex)
+                {
+                    StatusText = $"Could not open image: {ex.Message}";
+                    return;
+                }
 
-                await worker.OpenAsync();
                 if (!worker.IsLoaded)
                 {
                     StatusText = worker.FilesystemType == DiskImageWorker.FatType.Fat32
@@ -211,14 +286,10 @@ namespace NetImage.ViewModels
                 }
 
                 _imageWorker = worker;
+                _canSaveCurrentImage = true;
                 BuildTreeView();
                 RefreshDiskSpaceText();
-                CloseCommand.Enabled = true;
-                AddCommand.Enabled = true;
-                AddFolderCommand.Enabled = true;
-                CreateFolderCommand.Enabled = true;
-                SaveCommand.Enabled = true;
-                SaveAsCommand.Enabled = true;
+                UpdateCommandStates();
                 StatusText = $"Opened: {openFileDialog.FileName}";
             }
         }
@@ -226,6 +297,8 @@ namespace NetImage.ViewModels
         private void BuildTreeView()
         {
             TreeItems.Clear();
+            CurrentFolder = null;
+            SelectedItem = null;
 
             if (_imageWorker == null || _imageWorker.FilesAndFolders.Count == 0)
             {
@@ -269,32 +342,29 @@ namespace NetImage.ViewModels
             rootNode.IsExpanded = true;
             TreeItems.Add(rootNode);
             SelectedItem = rootNode;
+            CurrentFolder = rootNode;
         }
 
         private void ExecuteClose(object? parameter)
         {
             _imageWorker = null;
+            _canSaveCurrentImage = false;
             TreeItems.Clear();
-            CloseCommand.Enabled = false;
-            AddCommand.Enabled = false;
-            AddFolderCommand.Enabled = false;
-            CreateFolderCommand.Enabled = false;
-            DeleteCommand.Enabled = false;
-            ExtractCommand.Enabled = false;
-            EditCommand.Enabled = false;
-            SaveCommand.Enabled = false;
-            SaveAsCommand.Enabled = false;
             CurrentFolder = null;
             SelectedItem = null;
             ClearDiskSpaceText();
+            FilesystemTypeText = string.Empty;
+            ResetProgress();
+            UpdateCommandStates();
             StatusText = "Ready";
         }
 
-        private void ExecuteCreateFolder(object? parameter)
+        private async void ExecuteCreateFolder(object? parameter)
         {
-            if (_imageWorker == null)
+            if (_imageWorker == null || IsBusy)
                 return;
 
+            var worker = _imageWorker;
             var args = new CreateFolderRequestEventArgs();
             CreateFolderRequested?.Invoke(this, args);
 
@@ -302,10 +372,13 @@ namespace NetImage.ViewModels
                 return;
 
             var targetDir = GetSelectedFolderPath();
-            
+
             try
             {
-                _imageWorker.CreateFolder(targetDir, args.FolderName);
+                await RunBusyOperationAsync(
+                    "Creating folder...",
+                    () => Task.Run(() => worker.CreateFolder(targetDir, args.FolderName)),
+                    progressText: args.FolderName);
             }
             catch (Exception ex)
             {
@@ -320,11 +393,12 @@ namespace NetImage.ViewModels
             StatusText = $"Created folder '{args.FolderName}' in {location}";
         }
 
-        private void ExecuteAdd(object? parameter)
+        private async void ExecuteAdd(object? parameter)
         {
-            if (_imageWorker == null)
+            if (_imageWorker == null || IsBusy)
                 return;
 
+            var worker = _imageWorker;
             var openFileDialog = new OpenFileDialog
             {
                 Title = "Select file to add to disk image",
@@ -336,38 +410,28 @@ namespace NetImage.ViewModels
 
             var hostPath = openFileDialog.FileName;
             var fileName = System.IO.Path.GetFileName(hostPath);
-            byte[] content;
-
-            try
-            {
-                content = System.IO.File.ReadAllBytes(hostPath);
-            }
-            catch (Exception ex)
-            {
-                AddError?.Invoke(this, $"Could not read the selected file:\n{ex.Message}");
-                return;
-            }
-
-            // Pre-flight free-space check
-            var freeBytes = _imageWorker.GetFreeBytes();
-            if (content.Length > freeBytes)
-            {
-                AddError?.Invoke(this,
-                    $"Not enough space on the disk image.\n\n" +
-                    $"File size:  {content.Length:N0} bytes\n" +
-                    $"Free space: {freeBytes:N0} bytes");
-                return;
-            }
-
             var targetDir = GetSelectedFolderPath();
 
             try
             {
-                _imageWorker.AddFile(targetDir, fileName, content);
+                await RunBusyOperationAsync(
+                    "Adding file...",
+                    async () =>
+                    {
+                        var content = await Task.Run(() => System.IO.File.ReadAllBytes(hostPath));
+                        var freeBytes = worker.GetFreeBytes();
+                        if (content.Length > freeBytes)
+                        {
+                            throw new InvalidOperationException(BuildNotEnoughSpaceMessage("File size", content.Length, freeBytes));
+                        }
+
+                        await Task.Run(() => worker.AddFile(targetDir, fileName, content));
+                    },
+                    progressText: fileName);
             }
-            catch (InvalidOperationException ex)
+            catch (Exception ex)
             {
-                AddError?.Invoke(this, ex.Message);
+                AddError?.Invoke(this, $"Could not add the selected file:\n{ex.Message}");
                 return;
             }
 
@@ -378,11 +442,12 @@ namespace NetImage.ViewModels
             StatusText = $"Added '{fileName}' to {location}";
         }
 
-        private void ExecuteAddFolder(object? parameter)
+        private async void ExecuteAddFolder(object? parameter)
         {
-            if (_imageWorker == null)
+            if (_imageWorker == null || IsBusy)
                 return;
 
+            var worker = _imageWorker;
             var folderDialog = new OpenFolderDialog
             {
                 Title = "Select folder to add to disk image"
@@ -396,39 +461,31 @@ namespace NetImage.ViewModels
 
             var targetDir = GetSelectedFolderPath();
 
-            // Calculate total size
-            long totalSize = 0;
             try
             {
-                var files = Directory.GetFiles(hostPath, "*.*", SearchOption.AllDirectories);
-                foreach (var file in files)
-                {
-                    totalSize += new FileInfo(file).Length;
-                }
+                await RunBusyOperationAsync(
+                    "Scanning folder...",
+                    async () =>
+                    {
+                        var totalSize = await Task.Run(() => CalculateDirectorySize(hostPath));
+                        var freeBytes = worker.GetFreeBytes();
+                        if (totalSize > freeBytes)
+                        {
+                            throw new InvalidOperationException(BuildNotEnoughSpaceMessage("Folder size", totalSize, freeBytes));
+                        }
+
+                        ApplyOperationProgress("Adding folder...", new OperationProgress(0, totalSize, folderName));
+                        await worker.AddHostDirectoryAsync(
+                            targetDir,
+                            hostPath,
+                            totalSize,
+                            CreateProgressReporter("Adding folder..."));
+                    },
+                    progressText: folderName);
             }
             catch (Exception ex)
             {
-                AddError?.Invoke(this, $"Could not read the selected folder:\n{ex.Message}");
-                return;
-            }
-
-            var freeBytes = _imageWorker.GetFreeBytes();
-            if (totalSize > freeBytes)
-            {
-                AddError?.Invoke(this,
-                    $"Not enough space on the disk image.\n\n" +
-                    $"Folder size: {totalSize:N0} bytes\n" +
-                    $"Free space:  {freeBytes:N0} bytes");
-                return;
-            }
-
-            try
-            {
-                _imageWorker.AddHostDirectory(targetDir, hostPath);
-            }
-            catch (InvalidOperationException ex)
-            {
-                AddError?.Invoke(this, ex.Message);
+                AddError?.Invoke(this, $"Could not add the selected folder:\n{ex.Message}");
                 return;
             }
 
@@ -439,16 +496,20 @@ namespace NetImage.ViewModels
             StatusText = $"Added folder '{folderName}' to {location}";
         }
 
-        private void ExecuteDelete(object? parameter)
+        private async void ExecuteDelete(object? parameter)
         {
-            if (_imageWorker == null || _selectedItem == null)
+            if (_imageWorker == null || _selectedItem == null || IsBusy)
                 return;
 
+            var worker = _imageWorker;
             var item = _selectedItem;
 
             try
             {
-                _imageWorker.DeleteEntry(item.Path);
+                await RunBusyOperationAsync(
+                    "Deleting...",
+                    () => Task.Run(() => worker.DeleteEntry(item.Path)),
+                    progressText: item.Name);
             }
             catch (Exception ex)
             {
@@ -461,11 +522,12 @@ namespace NetImage.ViewModels
             StatusText = $"Deleted '{item.Name}'";
         }
 
-        private void ExecuteExtract(object? parameter)
+        private async void ExecuteExtract(object? parameter)
         {
-            if (_imageWorker == null || _selectedItem == null)
+            if (_imageWorker == null || _selectedItem == null || IsBusy)
                 return;
 
+            var worker = _imageWorker;
             var item = _selectedItem;
 
             if (item.IsFolder)
@@ -480,7 +542,10 @@ namespace NetImage.ViewModels
                     try
                     {
                         var destPath = string.IsNullOrEmpty(item.Path) ? folderDialog.FolderName : System.IO.Path.Combine(folderDialog.FolderName, item.Name);
-                        _imageWorker.ExtractFolder(item.Path, destPath);
+                        await RunBusyOperationAsync(
+                            "Extracting folder...",
+                            () => worker.ExtractFolderAsync(item.Path, destPath, CreateProgressReporter("Extracting folder...")),
+                            progressText: item.Name);
                         StatusText = $"Extracted folder '{item.Name}' to '{destPath}'";
                     }
                     catch (Exception ex)
@@ -491,14 +556,6 @@ namespace NetImage.ViewModels
             }
             else
             {
-                var content = _imageWorker.GetFileContent(item.Path);
-
-                if (content == null)
-                {
-                    ExtractError?.Invoke(this, $"Could not extract '{item.Name}'. File not found or read error.");
-                    return;
-                }
-
                 var saveFileDialog = new SaveFileDialog
                 {
                     Title = "Extract File",
@@ -510,7 +567,19 @@ namespace NetImage.ViewModels
                 {
                     try
                     {
-                        System.IO.File.WriteAllBytes(saveFileDialog.FileName, content);
+                        await RunBusyOperationAsync(
+                            "Extracting file...",
+                            async () =>
+                            {
+                                var content = await Task.Run(() => worker.GetFileContent(item.Path));
+                                if (content == null)
+                                {
+                                    throw new InvalidOperationException($"Could not extract '{item.Name}'. File not found or read error.");
+                                }
+
+                                await Task.Run(() => System.IO.File.WriteAllBytes(saveFileDialog.FileName, content));
+                            },
+                            progressText: item.Name);
                         StatusText = $"Extracted '{item.Name}' to '{saveFileDialog.FileName}'";
                     }
                     catch (Exception ex)
@@ -521,15 +590,31 @@ namespace NetImage.ViewModels
             }
         }
 
-        private void ExecuteEdit(object? parameter)
+        private async void ExecuteEdit(object? parameter)
         {
-            if (_imageWorker == null || _selectedItem == null)
+            if (_imageWorker == null || _selectedItem == null || IsBusy)
                 return;
 
+            var worker = _imageWorker;
             var item = _selectedItem;
+            byte[]? content = null;
 
-            // Get file content
-            var content = _imageWorker.GetFileContent(item.Path);
+            try
+            {
+                await RunBusyOperationAsync(
+                    "Loading file...",
+                    async () =>
+                    {
+                        content = await Task.Run(() => worker.GetFileContent(item.Path));
+                    },
+                    progressText: item.Name);
+            }
+            catch (Exception ex)
+            {
+                StatusText = $"Could not read '{item.Name}': {ex.Message}";
+                return;
+            }
+
             if (content == null)
             {
                 StatusText = $"Could not read '{item.Name}'. File not found or read error.";
@@ -546,7 +631,10 @@ namespace NetImage.ViewModels
 
             try
             {
-                _imageWorker.UpdateFile(item.Path, dialog.EditedContent);
+                await RunBusyOperationAsync(
+                    "Saving file changes...",
+                    () => Task.Run(() => worker.UpdateFile(item.Path, dialog.EditedContent)),
+                    progressText: item.Name);
                 BuildTreeView();
                 RefreshDiskSpaceText();
                 StatusText = $"Saved changes to '{item.Name}'";
@@ -559,13 +647,17 @@ namespace NetImage.ViewModels
 
         private async void ExecuteSave(object? parameter)
         {
-            if (_imageWorker == null)
+            if (_imageWorker == null || IsBusy)
                 return;
 
+            var worker = _imageWorker;
             try
             {
-                await _imageWorker.SaveAsync(_imageWorker.FilePath);
-                StatusText = $"Saved: {_imageWorker.FilePath}";
+                await RunBusyOperationAsync(
+                    "Saving image...",
+                    () => Task.Run(async () => await worker.SaveAsync(worker.FilePath)),
+                    progressText: System.IO.Path.GetFileName(worker.FilePath));
+                StatusText = $"Saved: {worker.FilePath}";
             }
             catch (Exception ex)
             {
@@ -575,23 +667,28 @@ namespace NetImage.ViewModels
 
         private async void ExecuteSaveAs(object? parameter)
         {
-            if (_imageWorker == null)
+            if (_imageWorker == null || IsBusy)
                 return;
 
+            var worker = _imageWorker;
             var saveFileDialog = new SaveFileDialog
             {
                 Title = "Save Disk Image As",
                 Filter = "Disk Image Files|*.ima;*.img|All Files|*.*",
-                FileName = string.IsNullOrEmpty(_imageWorker.FilePath) ? "newdisk.img" : System.IO.Path.GetFileName(_imageWorker.FilePath)
+                FileName = string.IsNullOrEmpty(worker.FilePath) ? "newdisk.img" : System.IO.Path.GetFileName(worker.FilePath)
             };
 
             if (saveFileDialog.ShowDialog() == true)
             {
                 try
                 {
-                    await _imageWorker.SaveAsync(saveFileDialog.FileName);
-                    _imageWorker.FilePath = saveFileDialog.FileName;
-                    SaveCommand.Enabled = true;
+                    await RunBusyOperationAsync(
+                        "Saving image...",
+                        () => Task.Run(async () => await worker.SaveAsync(saveFileDialog.FileName)),
+                        progressText: System.IO.Path.GetFileName(saveFileDialog.FileName));
+                    worker.FilePath = saveFileDialog.FileName;
+                    _canSaveCurrentImage = true;
+                    UpdateCommandStates();
                     StatusText = $"Saved as: {saveFileDialog.FileName}";
                 }
                 catch (Exception ex)
@@ -621,15 +718,106 @@ namespace NetImage.ViewModels
             return lastSlash >= 0 ? _selectedItem.Path[..lastSlash] : string.Empty;
         }
 
-        private void OnLoadingStarted(object? sender, EventArgs e)
+        private async Task RunBusyOperationAsync(string statusText, Func<Task> operation, bool isIndeterminate = true, string? progressText = null)
         {
-            ClearDiskSpaceText();
-            StatusText = "Loading";
+            BeginBusy(statusText, isIndeterminate, progressText);
+            try
+            {
+                await operation();
+            }
+            finally
+            {
+                EndBusy();
+            }
         }
 
-        private void OnLoadingCompleted(object? sender, EventArgs e)
+        private void BeginBusy(string statusText, bool isIndeterminate, string? progressText)
         {
-            StatusText = "Ready";
+            IsBusy = true;
+            StatusText = statusText;
+            IsProgressVisible = true;
+            IsProgressIndeterminate = isIndeterminate;
+            ProgressValue = 0;
+            ProgressText = progressText ?? statusText;
+            UpdateCommandStates();
+        }
+
+        private void EndBusy()
+        {
+            IsBusy = false;
+            ResetProgress();
+            UpdateCommandStates();
+        }
+
+        private void ResetProgress()
+        {
+            IsProgressVisible = false;
+            IsProgressIndeterminate = false;
+            ProgressValue = 0;
+            ProgressText = string.Empty;
+        }
+
+        private IProgress<OperationProgress> CreateProgressReporter(string statusText)
+        {
+            return new Progress<OperationProgress>(progress => ApplyOperationProgress(statusText, progress));
+        }
+
+        private void ApplyOperationProgress(string statusText, OperationProgress progress)
+        {
+            StatusText = statusText;
+            IsProgressVisible = true;
+            IsProgressIndeterminate = progress.TotalBytes <= 0;
+            ProgressValue = progress.TotalBytes <= 0
+                ? 0
+                : Math.Clamp(progress.ProcessedBytes * 100.0 / progress.TotalBytes, 0, 100);
+
+            var progressSummary = progress.TotalBytes <= 0
+                ? "Working..."
+                : $"{FormatBytes(progress.ProcessedBytes)} / {FormatBytes(progress.TotalBytes)}";
+            ProgressText = string.IsNullOrWhiteSpace(progress.CurrentItem)
+                ? progressSummary
+                : $"{progressSummary} - {progress.CurrentItem}";
+        }
+
+        private void UpdateCommandStates()
+        {
+            var hasLoadedImage = _imageWorker != null && _imageWorker.IsLoaded;
+            var hasWorker = _imageWorker != null;
+            var hasSelection = _selectedItem != null;
+
+            NewCommand.Enabled = !IsBusy;
+            OpenCommand.Enabled = !IsBusy;
+            CloseCommand.Enabled = hasWorker && !IsBusy;
+            AddCommand.Enabled = hasLoadedImage && !IsBusy;
+            AddFolderCommand.Enabled = hasLoadedImage && !IsBusy;
+            CreateFolderCommand.Enabled = hasLoadedImage && !IsBusy;
+            DeleteCommand.Enabled = hasLoadedImage && hasSelection && !IsBusy;
+            ExtractCommand.Enabled = hasLoadedImage && hasSelection && !IsBusy;
+            EditCommand.Enabled = hasLoadedImage &&
+                                  _selectedItem != null &&
+                                  !_selectedItem.IsFolder &&
+                                  !IsBinaryFile(_selectedItem.Name) &&
+                                  !IsBusy;
+            SaveCommand.Enabled = hasLoadedImage && _canSaveCurrentImage && !IsBusy;
+            SaveAsCommand.Enabled = hasLoadedImage && !IsBusy;
+        }
+
+        private static long CalculateDirectorySize(string hostPath)
+        {
+            long totalSize = 0;
+            foreach (var file in Directory.EnumerateFiles(hostPath, "*", SearchOption.AllDirectories))
+            {
+                totalSize += new FileInfo(file).Length;
+            }
+
+            return totalSize;
+        }
+
+        private static string BuildNotEnoughSpaceMessage(string sizeLabel, long requiredBytes, long freeBytes)
+        {
+            return $"Not enough space on the disk image.\n\n" +
+                   $"{sizeLabel}: {requiredBytes:N0} bytes\n" +
+                   $"Free space: {freeBytes:N0} bytes";
         }
 
         private void RefreshDiskSpaceText()
@@ -647,6 +835,7 @@ namespace NetImage.ViewModels
         private void ClearDiskSpaceText()
         {
             DiskSpaceText = string.Empty;
+            FilesystemTypeText = string.Empty;
         }
 
         private static string FormatBytes(long bytes)
