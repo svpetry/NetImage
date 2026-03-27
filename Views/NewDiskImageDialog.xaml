@@ -1,10 +1,10 @@
 <Window x:Class="NetImage.Views.NewDiskImageDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="New Disk Image" Height="250" Width="400"
+        Title="New Disk Image" Height="380" Width="450"
         Icon="/diskette.ico"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
+        ResizeMode="CanMinimize"
         ShowInTaskbar="False">
     <Grid x:Name="MainGrid" Margin="10">
         <Grid.RowDefinitions>
@@ -13,18 +13,70 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Text="Select disk image format:" Grid.Row="0" Margin="0,0,0,10"/>
+        <TabControl Grid.Row="1" Margin="0,0,0,10" SelectionChanged="TabSelectionChanged">
+            <!-- Floppy Disk Tab -->
+            <TabItem Header="Floppy Disk">
+                <StackPanel Margin="10">
+                    <RadioButton Content="160 KB (512 bytes/sector)" IsChecked="True" Tag="163840" GroupName="FloppySize"/>
+                    <RadioButton Content="180 KB (512 bytes/sector)" Tag="184320" GroupName="FloppySize"/>
+                    <RadioButton Content="320 KB (512 bytes/sector)" Tag="327680" GroupName="FloppySize"/>
+                    <RadioButton Content="360 KB (512 bytes/sector)" Tag="368640" GroupName="FloppySize"/>
+                    <RadioButton Content="720 KB (512 bytes/sector)" Tag="737280" GroupName="FloppySize"/>
+                    <RadioButton Content="1.2 MB (512 bytes/sector)" Tag="1245184" GroupName="FloppySize"/>
+                    <RadioButton Content="1.44 MB (512 bytes/sector)" Tag="1474560" GroupName="FloppySize"/>
+                    <RadioButton Content="2.88 MB (512 bytes/sector)" Tag="3006476" GroupName="FloppySize"/>
+                </StackPanel>
+            </TabItem>
 
-        <StackPanel Grid.Row="1" Margin="0,0,0,10">
-            <RadioButton Content="160 KB (512 bytes/sector)" IsChecked="True" Tag="163840"/>
-            <RadioButton Content="180 KB (512 bytes/sector)" Tag="184320"/>
-            <RadioButton Content="320 KB (512 bytes/sector)" Tag="327680"/>
-            <RadioButton Content="360 KB (512 bytes/sector)" Tag="368640"/>
-            <RadioButton Content="720 KB (512 bytes/sector)" Tag="737280"/>
-            <RadioButton Content="1.2 MB (512 bytes/sector)" Tag="1245184"/>
-            <RadioButton Content="1.44 MB (512 bytes/sector)" Tag="1474560"/>
-            <RadioButton Content="2.88 MB (512 bytes/sector)" Tag="3006476"/>
-        </StackPanel>
+            <!-- Hard Disk Tab -->
+            <TabItem Header="Hard Disk">
+                <Grid Margin="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Header -->
+                    <TextBlock Grid.Row="0" Grid.ColumnSpan="2" Text="Enter geometry (CHS):" FontWeight="Bold" Margin="0,0,0,15"/>
+
+                    <!-- Cylinders -->
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Cylinders:" VerticalAlignment="Center" Margin="0,0,15,0"/>
+                    <Grid Grid.Row="1" Grid.Column="1">
+                        <TextBox x:Name="CylindersBox" Width="80" Height="23" Text="1024" LostFocus="ValidateChs"/>
+                        <TextBlock x:Name="CylindersError" Foreground="Red" FontSize="10" Margin="5,26,0,0"/>
+                    </Grid>
+
+                    <!-- Heads -->
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Heads:" VerticalAlignment="Center" Margin="0,0,15,8"/>
+                    <Grid Grid.Row="2" Grid.Column="1">
+                        <TextBox x:Name="HeadsBox" Width="80" Height="23" Text="16" LostFocus="ValidateChs"/>
+                        <TextBlock x:Name="HeadsError" Foreground="Red" FontSize="10" Margin="5,26,0,0"/>
+                    </Grid>
+
+                    <!-- Sectors/Track -->
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Sectors/Track:" VerticalAlignment="Center" Margin="0,0,15,0"/>
+                    <Grid Grid.Row="3" Grid.Column="1">
+                        <TextBox x:Name="SectorsBox" Width="80" Height="23" Text="63" LostFocus="ValidateChs"/>
+                        <TextBlock x:Name="SectorsError" Foreground="Red" FontSize="10" Margin="5,26,0,0"/>
+                    </Grid>
+
+                    <!-- Calculated Size -->
+                    <Border Grid.Row="4" Grid.ColumnSpan="2" BorderBrush="#ccc" BorderThickness="1" Padding="10" Margin="0,15,0,0">
+                        <StackPanel>
+                            <TextBlock Text="Calculated Size:" FontWeight="Bold"/>
+                            <TextBlock x:Name="SizeDisplay" FontSize="14" Foreground="#2e7d32"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </TabItem>
+        </TabControl>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="OK" Width="75" Margin="0,0,10,0" Click="OkButton_Click" IsDefault="True"/>

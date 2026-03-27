@@ -243,15 +243,26 @@ namespace NetImage.ViewModels
 
             // Create new image worker with blank FAT image
             _imageWorker = new DiskImageWorker(string.Empty);
-            _imageWorker.CreateBlankImage(dialog.SelectedSize, "DISK");
+
+            if (dialog.IsHardDisk)
+            {
+                _imageWorker.CreateHardDiskImage(dialog.Cylinders, dialog.Heads, dialog.SectorsPerTrack, "DISK");
+            }
+            else
+            {
+                _imageWorker.CreateBlankImage(dialog.SelectedSize, "DISK");
+            }
+
             _canSaveCurrentImage = false;
 
             BuildTreeView();
             RefreshDiskSpaceText();
             UpdateCommandStates();
 
-            var sizeKB = dialog.SelectedSize / 1024;
-            StatusText = $"New {sizeKB} KB disk image created";
+            var sizeMB = dialog.SelectedSize / (1024.0 * 1024.0);
+            StatusText = dialog.IsHardDisk
+                ? $"New {sizeMB:F2} MB hard disk image created ({dialog.Cylinders}x{dialog.Heads}x{dialog.SectorsPerTrack})"
+                : $"New {dialog.SelectedSize / 1024} KB floppy disk image created";
         }
 
         private async void ExecuteOpen(object? parameter)

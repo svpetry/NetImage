@@ -163,13 +163,30 @@ namespace NetImage.Workers
             var sectorsPerCluster = sector[13];
             var reservedSectors = BitConverter.ToUInt16(sector.Slice(14, 2));
 
-            System.Diagnostics.Debug.WriteLine($"BPB check: bytesPerSector={bytesPerSector}, sectorsPerCluster={sectorsPerCluster}, reservedSectors={reservedSectors}");
+            System.Diagnostics.Debug.WriteLine($"BPB check: jump={sector[0]:X2}, bytesPerSector={bytesPerSector}, sectorsPerCluster={sectorsPerCluster}, reservedSectors={reservedSectors}");
 
             // Check if this looks like a valid FAT BPB
-            bool looksLikeFatBpb = (bytesPerSector == 512 || bytesPerSector == 1024 || bytesPerSector == 2048 || bytesPerSector == 4096) &&
-                                   (sectorsPerCluster == 1 || sectorsPerCluster == 2 || sectorsPerCluster == 4 ||
-                                    sectorsPerCluster == 8 || sectorsPerCluster == 16 || sectorsPerCluster == 32 || sectorsPerCluster == 64) &&
-                                   reservedSectors <= 32;
+            // Must start with 0xEB (jump instruction) AND have valid BPB values AND have OEM ID
+            bool hasFatJump = sector[0] == 0xEB;
+            bool hasValidBytesPerSector = (bytesPerSector == 512 || bytesPerSector == 1024 || bytesPerSector == 2048 || bytesPerSector == 4096);
+            bool hasValidSectorsPerCluster = (sectorsPerCluster == 1 || sectorsPerCluster == 2 || sectorsPerCluster == 4 ||
+                                              sectorsPerCluster == 8 || sectorsPerCluster == 16 || sectorsPerCluster == 32 || sectorsPerCluster == 64);
+
+            // FAT boot sectors have OEM ID at offset 3-10 (e.g., "MSDOS5.0", "FAT16   ", "MSWIN4.1")
+            // MBR boot code doesn't have printable ASCII there - it's random machine code
+            bool hasFatOemId = true;
+            for (int i = 3; i < Math.Min(11, sector.Length); i++)
+            {
+                byte b = sector[i];
+                // OEM ID should be printable ASCII or space (0x20-0x7E)
+                if (b != 0x20 && (b < 0x20 || b > 0x7E))
+                {
+                    hasFatOemId = false;
+                    break;
+                }
+            }
+
+            bool looksLikeFatBpb = hasFatJump && hasValidBytesPerSector && hasValidSectorsPerCluster && hasFatOemId;
 
             if (looksLikeFatBpb)
             {
@@ -1618,6 +1635,275 @@ namespace NetImage.Workers
         /// <param name="imageSize">Total size of the image in bytes (must be a multiple of 512).</param>
         /// <param name="volumeLabel">Optional volume label (max 11 characters).</param>
         public void CreateBlankImage(long imageSize, string volumeLabel = "")
+        {
+            CreateBlankFloppy(imageSize, volumeLabel);
+        }
+
+        /// <summary>
+        /// Creates a new blank FAT16 hard disk image with MBR partition table.
+        /// </summary>
+        /// <param name="cylinders">Number of cylinders (1-16383).</param>
+        /// <param name="heads">Number of heads per cylinder (1-255).</param>
+        /// <param name="sectorsPerTrack">Number of sectors per track (1-255).</param>
+        /// <param name="volumeLabel">Optional volume label (max 11 characters).</param>
+        public void CreateHardDiskImage(uint cylinders, uint heads, uint sectorsPerTrack, string volumeLabel = "")
+        {
+            if (cylinders == 0 || cylinders > 16383)
+                throw new ArgumentException("Cylinders must be between 1 and 16383.");
+            if (heads == 0 || heads > 255)
+                throw new ArgumentException("Heads must be between 1 and 255.");
+            if (sectorsPerTrack == 0 || sectorsPerTrack > 255)
+                throw new ArgumentException("Sectors per track must be between 1 and 255.");
+
+            if (!string.IsNullOrEmpty(volumeLabel) && volumeLabel.Length > 11)
+                volumeLabel = volumeLabel.Substring(0, 11);
+
+            uint bytesPerSector = 512;
+            long imageSize = (long)cylinders * heads * sectorsPerTrack * bytesPerSector;
+            _imageData = new byte[imageSize];
+            _partitionStartSector = 63; // Standard: first partition starts at sector 63
+
+            uint totalSectors = cylinders * heads * sectorsPerTrack;
+            uint partitionSectors = totalSectors - _partitionStartSector;
+
+            CreateMbr(_imageData.AsSpan(0, 512), cylinders, heads, sectorsPerTrack);
+            var bpb = CreateFat16BootSector(_imageData.AsSpan((int)(_partitionStartSector * bytesPerSector), 512), partitionSectors, heads, sectorsPerTrack);
+            InitializeFat16(bpb, _partitionStartSector, volumeLabel);
+
+            _isLoaded = true;
+            _fatType = FatType.Fat16;
+            VolumeLabel = volumeLabel;
+            FilesAndFolders.Clear();
+        }
+
+        private void CreateMbr(Span<byte> mbr, uint cylinders, uint heads, uint sectorsPerTrack)
+        {
+            // MBR boot code (446 bytes) - simple NOPs with a message
+            for (int i = 0; i < 3; i++) mbr[i] = 0xEB; // JMP instruction
+
+            // Partition table starts at offset 446
+            // Create one primary partition spanning the entire disk
+
+            var partitionEntry = mbr.Slice(446, 16);
+
+            // Boot indicator (0x80 = active/bootable)
+            partitionEntry[0] = 0x80;
+
+            // CHS start location: head=0, sector=1, cylinder=0
+            partitionEntry[1] = 0x00; // Head
+            partitionEntry[2] = 0x01; // Sector (high 2 bits of cyl | sector)
+            partitionEntry[3] = 0x00; // Cylinder
+
+            // Partition type: 0x0E = FAT16 (>32MB, LBA), 0x06 for <32MB
+            uint totalSectors = cylinders * heads * sectorsPerTrack;
+            partitionEntry[4] = totalSectors > 65536 ? (byte)0x0E : (byte)0x06;
+
+            // CHS end location
+            byte endHead = (byte)(heads - 1);
+            byte endSector = (byte)(0x3F | (((cylinders - 1) >> 2) & 0xC0));
+            byte endCylinder = (byte)((cylinders - 1) & 0x3F);
+            partitionEntry[5] = endHead;
+            partitionEntry[6] = endSector;
+            partitionEntry[7] = endCylinder;
+
+            // Starting LBA sector (little-endian, 4 bytes)
+            uint startLba = 63;
+            partitionEntry[8] = (byte)(startLba & 0xFF);
+            partitionEntry[9] = (byte)((startLba >> 8) & 0xFF);
+            partitionEntry[10] = (byte)((startLba >> 16) & 0xFF);
+            partitionEntry[11] = (byte)((startLba >> 24) & 0xFF);
+
+            // Partition size in sectors (little-endian, 4 bytes)
+            uint sectorCount = totalSectors - startLba;
+            partitionEntry[12] = (byte)(sectorCount & 0xFF);
+            partitionEntry[13] = (byte)((sectorCount >> 8) & 0xFF);
+            partitionEntry[14] = (byte)((sectorCount >> 16) & 0xFF);
+            partitionEntry[15] = (byte)((sectorCount >> 24) & 0xFF);
+
+            // MBR signature at offset 510-511
+            mbr[510] = 0x55;
+            mbr[511] = 0xAA;
+        }
+
+        private Bpb CreateFat16BootSector(Span<byte> bootSector, uint partitionSectors, uint heads, uint sectorsPerTrack)
+        {
+            // Calculate FAT16 parameters
+            byte sectorsPerCluster = GetSectorsPerClusterForFat16(partitionSectors);
+            uint reservedSectors = 32; // Standard for FAT16 hard disks
+            byte numFats = 2;
+            uint rootDirEntries = 512; // Standard for FAT16
+
+            uint bytesPerSector = 512;
+            uint rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
+            uint dataSectors = partitionSectors - reservedSectors - (numFats * CalculateFat16Sectors(partitionSectors, sectorsPerCluster, reservedSectors, numFats, rootDirEntries));
+
+            // Recalculate to ensure consistency
+            uint sectorsPerFat = CalculateFat16Sectors(partitionSectors, sectorsPerCluster, reservedSectors, numFats, rootDirEntries);
+            uint dataStartSector = reservedSectors + (numFats * sectorsPerFat) + rootDirSectors;
+            uint totalDataSectors = partitionSectors - dataStartSector;
+
+            // Build boot sector
+            // Jump instruction to skip BPB
+            bootSector[0] = 0xEB;
+            bootSector[1] = 0x76; // Jump offset (to boot code)
+            bootSector[2] = 0x90; // NOP
+
+            // OEM ID (8 bytes) - "MSDOS5.0" for FAT16
+            var oemBytes = System.Text.Encoding.ASCII.GetBytes("MSDOS5.0");
+            for (int i = 0; i < Math.Min(oemBytes.Length, 8); i++) bootSector[3 + i] = oemBytes[i];
+
+            // Bytes per sector (offset 11, 2 bytes)
+            bootSector[11] = (byte)(bytesPerSector & 0xFF);
+            bootSector[12] = (byte)((bytesPerSector >> 8) & 0xFF);
+
+            // Sectors per cluster (offset 13, 1 byte)
+            bootSector[13] = sectorsPerCluster;
+
+            // Reserved sectors (offset 14, 2 bytes)
+            bootSector[14] = (byte)(reservedSectors & 0xFF);
+            bootSector[15] = (byte)((reservedSectors >> 8) & 0xFF);
+
+            // Number of FATs (offset 16, 1 byte)
+            bootSector[16] = numFats;
+
+            // Root directory entries (offset 17, 2 bytes)
+            bootSector[17] = (byte)(rootDirEntries & 0xFF);
+            bootSector[18] = (byte)((rootDirEntries >> 8) & 0xFF);
+
+            // Total sectors (16-bit, offset 19, 2 bytes) - for FAT16 <= 32MB
+            uint totalSectors16 = partitionSectors <= 65535 ? partitionSectors : 0;
+            bootSector[19] = (byte)(totalSectors16 & 0xFF);
+            bootSector[20] = (byte)((totalSectors16 >> 8) & 0xFF);
+
+            // Media descriptor (offset 21, 1 byte) - 0xF8 for hard disk
+            bootSector[21] = 0xF8;
+
+            // Sectors per FAT (16-bit, offset 22, 2 bytes)
+            bootSector[22] = (byte)(sectorsPerFat & 0xFF);
+            bootSector[23] = (byte)((sectorsPerFat >> 8) & 0xFF);
+
+            // Sectors per track (offset 24, 2 bytes)
+            bootSector[24] = (byte)(sectorsPerTrack & 0xFF);
+            bootSector[25] = (byte)((sectorsPerTrack >> 8) & 0xFF);
+
+            // Heads per cylinder (offset 26, 2 bytes)
+            bootSector[26] = (byte)(heads & 0xFF);
+            bootSector[27] = (byte)((heads >> 8) & 0xFF);
+
+            // Hidden sectors (offset 28, 4 bytes) - sectors before this partition
+            uint hiddenSectors = _partitionStartSector;
+            bootSector[28] = (byte)(hiddenSectors & 0xFF);
+            bootSector[29] = (byte)((hiddenSectors >> 8) & 0xFF);
+            bootSector[30] = (byte)((hiddenSectors >> 16) & 0xFF);
+            bootSector[31] = (byte)((hiddenSectors >> 24) & 0xFF);
+
+            // Total sectors (32-bit, offset 32, 4 bytes) - for >32MB partitions
+            bootSector[32] = (byte)(partitionSectors & 0xFF);
+            bootSector[33] = (byte)((partitionSectors >> 8) & 0xFF);
+            bootSector[34] = (byte)((partitionSectors >> 16) & 0xFF);
+            bootSector[35] = (byte)((partitionSectors >> 24) & 0xFF);
+
+            // Boot signature (offset 510, 2 bytes)
+            bootSector[510] = 0x55;
+            bootSector[511] = 0xAA;
+
+            // Return BPB struct for later use
+            return new Bpb
+            {
+                BytesPerSector = 512,
+                SectorsPerCluster = sectorsPerCluster,
+                ReservedSectors = reservedSectors,
+                NumFats = numFats,
+                RootDirEntries = rootDirEntries,
+                SectorsPerFat16 = sectorsPerFat,
+                SectorsPerTrack = sectorsPerTrack,
+                HeadsPerCylinder = heads,
+                TotalSectors32 = partitionSectors
+            };
+        }
+
+        private byte GetSectorsPerClusterForFat16(uint totalSectors)
+        {
+            // Choose sectors per cluster for FAT16 based on partition size
+            if (totalSectors <= 32768) return 4;   // Up to ~16MB
+            if (totalSectors <= 65536) return 8;   // Up to ~32MB
+            if (totalSectors <= 131072) return 16; // Up to ~64MB
+            if (totalSectors <= 262144) return 32; // Up to ~128MB
+            return 64;                              // Larger partitions
+        }
+
+        private uint CalculateFat16Sectors(uint totalSectors, byte sectorsPerCluster, uint reservedSectors, byte numFats, uint rootDirEntries)
+        {
+            uint bytesPerSector = 512;
+            uint rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
+
+            // Iterate to find correct FAT size
+            for (int i = 0; i < 10; i++)
+            {
+                uint fatSizeIter = (i > 0) ? ((totalSectors - reservedSectors - rootDirSectors) / sectorsPerCluster * 3u / 2 + bytesPerSector - 1) / bytesPerSector : 1;
+                uint dataStartIter = reservedSectors + (numFats * fatSizeIter) + rootDirSectors;
+                uint dataSectorsIter = totalSectors - dataStartIter;
+
+                if (dataSectorsIter <= 0) break;
+
+                uint clusterCountIter = dataSectorsIter / sectorsPerCluster;
+                uint fatSizeNew = (clusterCountIter * 3u / 2 + bytesPerSector - 1) / bytesPerSector;
+
+                // Check if converged
+                uint nextDataStart = reservedSectors + (numFats * fatSizeNew) + rootDirSectors;
+                if (Math.Abs((long)nextDataStart - (long)dataStartIter) < 2)
+                    return fatSizeNew;
+            }
+
+            // Fallback calculation
+            uint dataStartFallback = reservedSectors + rootDirSectors;
+            uint dataSectorsFallback = totalSectors - dataStartFallback;
+            uint clusterCountFallback = dataSectorsFallback / sectorsPerCluster;
+            return (clusterCountFallback * 3u / 2 + bytesPerSector - 1) / bytesPerSector;
+        }
+
+        private void InitializeFat16(Bpb bpb, uint partitionStart, string volumeLabel)
+        {
+            var imageData = _imageData!;
+            uint bytesPerSector = bpb.BytesPerSector;
+            byte sectorsPerCluster = bpb.SectorsPerCluster;
+            uint reservedSectors = bpb.ReservedSectors;
+            byte numFats = bpb.NumFats;
+            uint rootDirEntries = bpb.RootDirEntries;
+            uint sectorsPerFat = bpb.SectorsPerFat16;
+
+            // Calculate cluster count for FAT size
+            uint rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
+            uint dataStartSector = partitionStart + reservedSectors + (numFats * sectorsPerFat) + rootDirSectors;
+
+            // Initialize FATs
+            for (byte fatNum = 0; fatNum < numFats; fatNum++)
+            {
+                uint fatStartSector = partitionStart + reservedSectors + (fatNum * sectorsPerFat);
+                uint fatOffset = fatStartSector * bytesPerSector;
+
+                // FAT16: First entry is media descriptor + high bits of reserved cluster
+                imageData[fatOffset] = 0xF8;
+                imageData[fatOffset + 1] = 0xFF;
+                imageData[fatOffset + 2] = 0xFF;
+                imageData[fatOffset + 3] = 0x0F;
+
+                // Second entry (cluster 1) marks end of reserved cluster chain
+                imageData[fatOffset + 4] = 0xFF;
+                imageData[fatOffset + 5] = 0x0F;
+            }
+
+            // Initialize root directory with volume label
+            uint rootDirStartSector = partitionStart + reservedSectors + (numFats * sectorsPerFat);
+            uint rootDirOffset = rootDirStartSector * bytesPerSector;
+
+            if (!string.IsNullOrEmpty(volumeLabel))
+            {
+                CreateVolumeLabelEntry(imageData.AsSpan((int)rootDirOffset), volumeLabel);
+            }
+        }
+
+        private void CreateBlankFloppy(long imageSize, string volumeLabel)
         {
             if (imageSize <= 0 || imageSize % 512 != 0)
                 throw new ArgumentException("Image size must be a positive multiple of 512 bytes.");
