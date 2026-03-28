@@ -33,8 +33,8 @@
 
         <!-- Buttons -->
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button Content="Load Data" Width="90" Click="LoadDataButton_Click" Margin="0,0,10,0"/>
-            <Button Content="Save Data" Width="90" Click="SaveDataButton_Click" Margin="0,0,10,0"/>
+            <Button Content="Load from file" Width="90" Click="LoadDataButton_Click" Margin="0,0,10,0"/>
+            <Button Content="Save to file" Width="90" Click="SaveDataButton_Click" Margin="0,0,10,0"/>
             <Button Content="Save" Width="80" Click="SaveButton_Click" IsDefault="True" Margin="0,0,10,0"/>
             <Button Content="Cancel" Width="80" Click="CancelButton_Click" IsCancel="True"/>
         </StackPanel>
