@@ -49,6 +49,7 @@ namespace NetImage.Views
                 vm.DeleteError += OnDeleteError;
                 vm.ExtractError += OnExtractError;
                 vm.SaveError += OnSaveError;
+                vm.CloseImageRequested += OnCloseImageRequested;
             }
 
             DataContextChanged += (_, e) =>
@@ -61,6 +62,7 @@ namespace NetImage.Views
                     oldVm.DeleteError -= OnDeleteError;
                     oldVm.ExtractError -= OnExtractError;
                     oldVm.SaveError -= OnSaveError;
+                    oldVm.CloseImageRequested -= OnCloseImageRequested;
                 }
                 if (e.NewValue is MainViewModel newVm)
                 {
@@ -70,8 +72,34 @@ namespace NetImage.Views
                     newVm.DeleteError += OnDeleteError;
                     newVm.ExtractError += OnExtractError;
                     newVm.SaveError += OnSaveError;
+                    newVm.CloseImageRequested += OnCloseImageRequested;
                 }
             };
+        }
+
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            base.OnClosing(e);
+            if (DataContext is MainViewModel vm && vm.HasUnsavedChanges)
+            {
+                var result = MessageBox.Show(
+                    "You have unsaved changes. Do you want to save them before closing?",
+                    "Unsaved Changes",
+                    MessageBoxButton.YesNoCancel,
+                    MessageBoxImage.Question);
+
+                if (result == MessageBoxResult.Cancel)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+
+                if (result == MessageBoxResult.Yes)
+                {
+                    e.Cancel = true;
+                    vm.SaveCommand.Execute(null);
+                }
+            }
         }
 
         private void OnTreeViewSelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
@@ -89,9 +117,24 @@ namespace NetImage.Views
         {
             if (DataContext is MainViewModel vm)
             {
-                if (e.AddedItems.Count > 0 && e.AddedItems[0] is TreeItem item)
+                // Update SelectedItems collection for multiselect support
+                var selectedItemsList = MainListView.SelectedItems.OfType<TreeItem>().ToList();
+
+                // Clear and repopulate the collection
+                while (vm.SelectedItems.Count > 0)
                 {
-                    vm.SelectedItem = item;
+                    vm.SelectedItems.RemoveAt(0);
+                }
+
+                foreach (var item in selectedItemsList)
+                {
+                    vm.SelectedItems.Add(item);
+                }
+
+                // Also update SelectedItem for backwards compatibility (first selected item)
+                if (selectedItemsList.Count > 0)
+                {
+                    vm.SelectedItem = selectedItemsList[0];
                 }
                 else
                 {
@@ -162,6 +205,31 @@ namespace NetImage.Views
         private void OnSaveError(object? sender, string message)
         {
             MessageBox.Show(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+
+        private void OnCloseImageRequested(object? sender, CloseImageRequestEventArgs e)
+        {
+            var result = MessageBox.Show(
+                "You have unsaved changes. Do you want to save them before closing?",
+                "Unsaved Changes",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Question);
+
+            switch (result)
+            {
+                case MessageBoxResult.Yes:
+                    e.AllowClose = true;
+                    e.SaveChanges = true;
+                    break;
+                case MessageBoxResult.No:
+                    e.AllowClose = true;
+                    e.SaveChanges = false;
+                    break;
+                case MessageBoxResult.Cancel:
+                    e.AllowClose = false;
+                    e.SaveChanges = false;
+                    break;
+            }
         }
 
         private void GridViewHeader_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)

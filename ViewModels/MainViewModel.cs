@@ -24,7 +24,9 @@ namespace NetImage.ViewModels
         private DiskImageWorker? _imageWorker;
         private TreeItem? _currentFolder;
         private TreeItem? _selectedItem;
+        private readonly ObservableCollection<TreeItem> _selectedItems = new();
         private bool _canSaveCurrentImage;
+        private bool _hasUnsavedChanges;
         private bool _isBusy;
         private bool _isProgressVisible;
         private bool _isProgressIndeterminate;
@@ -40,6 +42,7 @@ namespace NetImage.ViewModels
         public event EventHandler<string>? ExtractError;
 
         public event EventHandler<string>? SaveError;
+        public event EventHandler<CloseImageRequestEventArgs>? CloseImageRequested;
 
         public MainViewModel()
         {
@@ -174,6 +177,16 @@ namespace NetImage.ViewModels
 
         public ObservableCollection<TreeItem> TreeItems { get; }
 
+        public bool HasUnsavedChanges
+        {
+            get => _hasUnsavedChanges;
+            private set
+            {
+                _hasUnsavedChanges = value;
+                OnPropertyChanged();
+            }
+        }
+
         public TreeItem? CurrentFolder
         {
             get => _currentFolder;
@@ -195,6 +208,9 @@ namespace NetImage.ViewModels
                 UpdateCommandStates();
             }
         }
+
+        /// <summary>Collection of selected items in the ListView (supports multiselect).</summary>
+        public ObservableCollection<TreeItem> SelectedItems => _selectedItems;
 
         /// <summary>
         /// Returns true if the file has a known binary extension.
@@ -235,8 +251,27 @@ namespace NetImage.ViewModels
             ".PRN", ".PS", ".PCL", ".EOT", ".CAB"
         };
 
-        private void ExecuteNew(object? parameter)
+        private async void ExecuteNew(object? parameter)
         {
+            if (_imageWorker != null && _hasUnsavedChanges)
+            {
+                var args = new CloseImageRequestEventArgs();
+                CloseImageRequested?.Invoke(this, args);
+
+                if (!args.AllowClose)
+                    return;
+
+                if (args.SaveChanges && !string.IsNullOrEmpty(_imageWorker.FilePath))
+                {
+                    await RunBusyOperationAsync(
+                        "Saving image...",
+                        () => Task.Run(async () => await _imageWorker.SaveAsync(_imageWorker.FilePath)),
+                        progressText: System.IO.Path.GetFileName(_imageWorker.FilePath));
+                    HasUnsavedChanges = false;
+                    StatusText = $"Saved: {_imageWorker.FilePath}";
+                }
+            }
+
             var dialog = new NewDiskImageDialog();
             if (dialog.ShowDialog() != true || dialog.SelectedSize == 0)
                 return;
@@ -254,6 +289,7 @@ namespace NetImage.ViewModels
             }
 
             _canSaveCurrentImage = false;
+            _hasUnsavedChanges = false;
 
             BuildTreeView();
             RefreshDiskSpaceText();
@@ -267,6 +303,25 @@ namespace NetImage.ViewModels
 
         private async void ExecuteOpen(object? parameter)
         {
+            if (_imageWorker != null && _hasUnsavedChanges)
+            {
+                var args = new CloseImageRequestEventArgs();
+                CloseImageRequested?.Invoke(this, args);
+
+                if (!args.AllowClose)
+                    return;
+
+                if (args.SaveChanges && !string.IsNullOrEmpty(_imageWorker.FilePath))
+                {
+                    await RunBusyOperationAsync(
+                        "Saving image...",
+                        () => Task.Run(async () => await _imageWorker.SaveAsync(_imageWorker.FilePath)),
+                        progressText: System.IO.Path.GetFileName(_imageWorker.FilePath));
+                    HasUnsavedChanges = false;
+                    StatusText = $"Saved: {_imageWorker.FilePath}";
+                }
+            }
+
             var openFileDialog = new OpenFileDialog
             {
                 Filter = "Disk Image Files|*.ima;*.img|All Files|*.*"
@@ -356,10 +411,33 @@ namespace NetImage.ViewModels
             CurrentFolder = rootNode;
         }
 
-        private void ExecuteClose(object? parameter)
+        private async void ExecuteClose(object? parameter)
         {
+            if (_imageWorker == null)
+                return;
+
+            if (_hasUnsavedChanges)
+            {
+                var args = new CloseImageRequestEventArgs();
+                CloseImageRequested?.Invoke(this, args);
+
+                if (!args.AllowClose)
+                    return;
+
+                if (args.SaveChanges && !string.IsNullOrEmpty(_imageWorker.FilePath))
+                {
+                    await RunBusyOperationAsync(
+                        "Saving image...",
+                        () => Task.Run(async () => await _imageWorker.SaveAsync(_imageWorker.FilePath)),
+                        progressText: System.IO.Path.GetFileName(_imageWorker.FilePath));
+                    HasUnsavedChanges = false;
+                    StatusText = $"Saved: {_imageWorker.FilePath}";
+                }
+            }
+
             _imageWorker = null;
             _canSaveCurrentImage = false;
+            _hasUnsavedChanges = false;
             TreeItems.Clear();
             CurrentFolder = null;
             SelectedItem = null;
@@ -399,6 +477,7 @@ namespace NetImage.ViewModels
 
             BuildTreeView();
             RefreshDiskSpaceText();
+            HasUnsavedChanges = true;
 
             var location = string.IsNullOrEmpty(targetDir) ? "root" : targetDir;
             StatusText = $"Created folder '{args.FolderName}' in {location}";
@@ -448,6 +527,7 @@ namespace NetImage.ViewModels
 
             BuildTreeView();
             RefreshDiskSpaceText();
+            HasUnsavedChanges = true;
 
             var location = string.IsNullOrEmpty(targetDir) ? "root" : targetDir;
             StatusText = $"Added '{fileName}' to {location}";
@@ -502,6 +582,7 @@ namespace NetImage.ViewModels
 
             BuildTreeView();
             RefreshDiskSpaceText();
+            HasUnsavedChanges = true;
 
             var location = string.IsNullOrEmpty(targetDir) ? "root" : targetDir;
             StatusText = $"Added folder '{folderName}' to {location}";
@@ -509,18 +590,32 @@ namespace NetImage.ViewModels
 
         private async void ExecuteDelete(object? parameter)
         {
-            if (_imageWorker == null || _selectedItem == null || IsBusy)
+            if (_imageWorker == null || IsBusy)
+                return;
+
+            // Get items to delete: use SelectedItems if multiselect, otherwise fall back to _selectedItem
+            var itemsToDelete = _selectedItems.Count > 0
+                ? _selectedItems.ToList()
+                : (_selectedItem != null ? new List<TreeItem> { _selectedItem } : null);
+
+            if (itemsToDelete == null || itemsToDelete.Count == 0)
                 return;
 
             var worker = _imageWorker;
-            var item = _selectedItem;
 
             try
             {
                 await RunBusyOperationAsync(
                     "Deleting...",
-                    () => Task.Run(() => worker.DeleteEntry(item.Path)),
-                    progressText: item.Name);
+                    async () =>
+                    {
+                        foreach (var item in itemsToDelete)
+                        {
+                            worker.DeleteEntry(item.Path);
+                        }
+                    },
+                    isIndeterminate: true,
+                    progressText: itemsToDelete.Count > 1 ? $"{itemsToDelete.Count} items" : itemsToDelete[0].Name);
             }
             catch (Exception ex)
             {
@@ -530,72 +625,192 @@ namespace NetImage.ViewModels
 
             BuildTreeView();
             RefreshDiskSpaceText();
-            StatusText = $"Deleted '{item.Name}'";
+            HasUnsavedChanges = true;
+            StatusText = itemsToDelete.Count > 1
+                ? $"Deleted {itemsToDelete.Count} items"
+                : $"Deleted '{itemsToDelete[0].Name}'";
         }
 
         private async void ExecuteExtract(object? parameter)
         {
-            if (_imageWorker == null || _selectedItem == null || IsBusy)
+            if (_imageWorker == null || IsBusy)
+                return;
+
+            // Get items to extract: use SelectedItems if multiselect, otherwise fall back to _selectedItem
+            var itemsToExtract = _selectedItems.Count > 0
+                ? _selectedItems.ToList()
+                : (_selectedItem != null ? new List<TreeItem> { _selectedItem } : null);
+
+            if (itemsToExtract == null || itemsToExtract.Count == 0)
                 return;
 
             var worker = _imageWorker;
-            var item = _selectedItem;
 
-            if (item.IsFolder)
+            // Determine extraction mode based on selection
+            var hasFolders = itemsToExtract.Any(i => i.IsFolder);
+            var hasFiles = itemsToExtract.Any(i => !i.IsFolder);
+            var isSingleItem = itemsToExtract.Count == 1;
+
+            // If mixed selection or multiple folders, require folder destination
+            if (hasFolders && hasFiles || (hasFolders && itemsToExtract.Count > 1))
             {
                 var folderDialog = new OpenFolderDialog
                 {
                     Title = "Select Destination Folder"
                 };
 
-                if (folderDialog.ShowDialog() == true)
+                if (folderDialog.ShowDialog() != true)
+                    return;
+
+                var destPath = folderDialog.FolderName;
+
+                try
                 {
-                    try
+                    await RunBusyOperationAsync(
+                        "Extracting...",
+                        async () =>
+                        {
+                            long totalBytes = 0;
+                            foreach (var item in itemsToExtract)
+                            {
+                                if (item.IsFolder)
+                                {
+                                    var destFullPath = System.IO.Path.Combine(destPath, item.Name);
+                                    var folderSize = CalculateFolderSize(item.Path);
+                                    totalBytes += folderSize;
+                                    await worker.ExtractFolderAsync(item.Path, destFullPath, CreateProgressReporter("Extracting..."));
+                                }
+                                else
+                                {
+                                    var content = worker.GetFileContent(item.Path);
+                                    if (content != null)
+                                    {
+                                        var destFullPath = System.IO.Path.Combine(destPath, item.Name);
+                                        System.IO.File.WriteAllBytes(destFullPath, content);
+                                        totalBytes += content.Length;
+                                    }
+                                }
+                            }
+                        },
+                        progressText: $"{itemsToExtract.Count} items");
+                    StatusText = $"Extracted {itemsToExtract.Count} items to '{destPath}'";
+                }
+                catch (Exception ex)
+                {
+                    ExtractError?.Invoke(this, $"Failed to extract items:\n{ex.Message}");
+                }
+            }
+            else if (hasFolders)
+            {
+                // Only folders selected
+                var folderDialog = new OpenFolderDialog
+                {
+                    Title = "Select Destination Folder"
+                };
+
+                if (folderDialog.ShowDialog() != true)
+                    return;
+
+                try
+                {
+                    foreach (var item in itemsToExtract)
                     {
-                        var destPath = string.IsNullOrEmpty(item.Path) ? folderDialog.FolderName : System.IO.Path.Combine(folderDialog.FolderName, item.Name);
-                        await RunBusyOperationAsync(
-                            "Extracting folder...",
-                            () => worker.ExtractFolderAsync(item.Path, destPath, CreateProgressReporter("Extracting folder...")),
-                            progressText: item.Name);
-                        StatusText = $"Extracted folder '{item.Name}' to '{destPath}'";
+                        if (item.IsFolder)
+                        {
+                            var destPath = isSingleItem && string.IsNullOrEmpty(item.Path)
+                                ? folderDialog.FolderName
+                                : System.IO.Path.Combine(folderDialog.FolderName, item.Name);
+
+                            await RunBusyOperationAsync(
+                                "Extracting folder...",
+                                () => worker.ExtractFolderAsync(item.Path, destPath, CreateProgressReporter("Extracting folder...")),
+                                progressText: item.Name);
+                        }
                     }
-                    catch (Exception ex)
-                    {
-                        ExtractError?.Invoke(this, $"Failed to extract folder:\n{ex.Message}");
-                    }
+
+                    StatusText = itemsToExtract.Count > 1
+                        ? $"Extracted {itemsToExtract.Count} folders to '{folderDialog.FolderName}'"
+                        : $"Extracted folder '{itemsToExtract[0].Name}' to '{folderDialog.FolderName}'";
+                }
+                catch (Exception ex)
+                {
+                    ExtractError?.Invoke(this, $"Failed to extract folder(s):\n{ex.Message}");
                 }
             }
             else
             {
-                var saveFileDialog = new SaveFileDialog
+                // Only files selected
+                if (isSingleItem)
                 {
-                    Title = "Extract File",
-                    FileName = item.Name,
-                    Filter = "All Files|*.*"
-                };
+                    // Single file: use SaveFileDialog for explicit path
+                    var saveFileDialog = new SaveFileDialog
+                    {
+                        Title = "Extract File",
+                        FileName = itemsToExtract[0].Name,
+                        Filter = "All Files|*.*"
+                    };
 
-                if (saveFileDialog.ShowDialog() == true)
+                    if (saveFileDialog.ShowDialog() == true)
+                    {
+                        try
+                        {
+                            await RunBusyOperationAsync(
+                                "Extracting file...",
+                                async () =>
+                                {
+                                    var item = itemsToExtract[0];
+                                    var content = await Task.Run(() => worker.GetFileContent(item.Path));
+                                    if (content == null)
+                                    {
+                                        throw new InvalidOperationException($"Could not extract '{item.Name}'. File not found or read error.");
+                                    }
+
+                                    await Task.Run(() => System.IO.File.WriteAllBytes(saveFileDialog.FileName, content));
+                                },
+                                progressText: itemsToExtract[0].Name);
+                            StatusText = $"Extracted '{itemsToExtract[0].Name}' to '{saveFileDialog.FileName}'";
+                        }
+                        catch (Exception ex)
+                        {
+                            ExtractError?.Invoke(this, $"Failed to save extracted file:\n{ex.Message}");
+                        }
+                    }
+                }
+                else
                 {
+                    // Multiple files: require folder destination
+                    var folderDialog = new OpenFolderDialog
+                    {
+                        Title = "Select Destination Folder"
+                    };
+
+                    if (folderDialog.ShowDialog() != true)
+                        return;
+
+                    var destPath = folderDialog.FolderName;
+
                     try
                     {
                         await RunBusyOperationAsync(
-                            "Extracting file...",
+                            "Extracting files...",
                             async () =>
                             {
-                                var content = await Task.Run(() => worker.GetFileContent(item.Path));
-                                if (content == null)
+                                foreach (var item in itemsToExtract)
                                 {
-                                    throw new InvalidOperationException($"Could not extract '{item.Name}'. File not found or read error.");
+                                    var content = await Task.Run(() => worker.GetFileContent(item.Path));
+                                    if (content != null)
+                                    {
+                                        var destFullPath = System.IO.Path.Combine(destPath, item.Name);
+                                        await Task.Run(() => System.IO.File.WriteAllBytes(destFullPath, content));
+                                    }
                                 }
-
-                                await Task.Run(() => System.IO.File.WriteAllBytes(saveFileDialog.FileName, content));
                             },
-                            progressText: item.Name);
-                        StatusText = $"Extracted '{item.Name}' to '{saveFileDialog.FileName}'";
+                            progressText: $"{itemsToExtract.Count} files");
+                        StatusText = $"Extracted {itemsToExtract.Count} files to '{destPath}'";
                     }
                     catch (Exception ex)
                     {
-                        ExtractError?.Invoke(this, $"Failed to save extracted file:\n{ex.Message}");
+                        ExtractError?.Invoke(this, $"Failed to extract files:\n{ex.Message}");
                     }
                 }
             }
@@ -648,6 +863,7 @@ namespace NetImage.ViewModels
                     progressText: item.Name);
                 BuildTreeView();
                 RefreshDiskSpaceText();
+                HasUnsavedChanges = true;
                 StatusText = $"Saved changes to '{item.Name}'";
             }
             catch (Exception ex)
@@ -668,6 +884,7 @@ namespace NetImage.ViewModels
                     "Saving image...",
                     () => Task.Run(async () => await worker.SaveAsync(worker.FilePath)),
                     progressText: System.IO.Path.GetFileName(worker.FilePath));
+                HasUnsavedChanges = false;
                 StatusText = $"Saved: {worker.FilePath}";
             }
             catch (Exception ex)
@@ -699,6 +916,7 @@ namespace NetImage.ViewModels
                         progressText: System.IO.Path.GetFileName(saveFileDialog.FileName));
                     worker.FilePath = saveFileDialog.FileName;
                     _canSaveCurrentImage = true;
+                    HasUnsavedChanges = false;
                     UpdateCommandStates();
                     StatusText = $"Saved as: {saveFileDialog.FileName}";
                 }
@@ -822,6 +1040,19 @@ namespace NetImage.ViewModels
             }
 
             return totalSize;
+        }
+
+        /// <summary>Calculates the total size of a folder inside the disk image.</summary>
+        private long CalculateFolderSize(string folderPath)
+        {
+            if (_imageWorker == null)
+                return 0;
+
+            var prefix = string.IsNullOrEmpty(folderPath) ? string.Empty : folderPath + "\\";
+            return _imageWorker.FilesAndFolders
+                .Where(entry => string.IsNullOrEmpty(prefix) || entry.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Where(entry => !string.IsNullOrEmpty(folderPath) || entry.Path != folderPath)
+                .Sum(entry => entry.Size ?? 0L);
         }
 
         private static string BuildNotEnoughSpaceMessage(string sizeLabel, long requiredBytes, long freeBytes)
