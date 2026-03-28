@@ -1418,6 +1418,29 @@ namespace NetImage.Workers
             ParseFatFilesystem();
         }
 
+        public void RenameEntry(string path, string newName)
+        {
+            if (_imageData == null || !_isLoaded)
+                throw new InvalidOperationException("Image must be opened before renaming files.");
+
+            if (string.IsNullOrWhiteSpace(newName))
+                throw new ArgumentException("New name cannot be empty.");
+
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512));
+
+            var lastSlash = path.LastIndexOf('\\');
+            var targetDirectory = lastSlash >= 0 ? path.Substring(0, lastSlash) : string.Empty;
+            var oldName = lastSlash >= 0 ? path.Substring(lastSlash + 1) : path;
+
+            if (!TryResolveDirectory(targetDirectory, bpb, out var currentDirectory))
+                throw new FileNotFoundException($"Directory '{targetDirectory}' not found on the disk image.");
+
+            RenameEntryInternal(currentDirectory, oldName, newName, bpb);
+
+            ParseFatFilesystem();
+        }
+
         private void DeleteEntryInternal(DirectoryLocation directory, string name, Bpb bpb)
         {
             var imageData = _imageData!;
@@ -1487,6 +1510,77 @@ namespace NetImage.Workers
                     availableEntries.Add(entryName);
             }
             throw new FileNotFoundException($"Entry '{name}' not found. Available entries: [{string.Join(", ", availableEntries)}]");
+        }
+
+        private void RenameEntryInternal(DirectoryLocation directory, string oldName, string newName, Bpb bpb)
+        {
+            var imageData = _imageData!;
+
+            System.Diagnostics.Debug.WriteLine($"RenameEntryInternal: renaming '{oldName}' to '{newName}' in directory starting at sector {directory.StartSector}");
+
+            // Check if new name already exists
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
+            {
+                var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
+                var firstByte = entry[0];
+
+                if (firstByte == 0x00)
+                    break;
+
+                if (IsDeletedEntry(firstByte))
+                    continue;
+
+                if ((entry[11] & 0x08) != 0)
+                    continue;
+
+                var entryName = DecodeEntryName(entry);
+                if (entryName != "." && entryName != ".." && entryName.Equals(newName, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException($"An entry with the name '{newName}' already exists in this directory.");
+                }
+            }
+
+            // Find and rename the entry
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
+            {
+                var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
+                var firstByte = entry[0];
+
+                if (firstByte == 0x00)
+                    break;
+
+                if (IsDeletedEntry(firstByte))
+                    continue;
+
+                if ((entry[11] & 0x08) != 0)
+                    continue;
+
+                var entryName = DecodeEntryName(entry);
+                if (entryName.Equals(oldName, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Convert newName to FAT8.3 format
+                    var fatName = EncodeFileName(newName);
+
+                    // Write the new name to the directory entry
+                    var entryBuffer = new byte[32];
+                    entry.CopyTo(entryBuffer);
+
+                    // Copy the FAT name (11 bytes: 8 characters + '.' + 3 extension)
+                    for (int i = 0; i < 11 && i < fatName.Length; i++)
+                    {
+                        entryBuffer[i] = (byte)fatName[i];
+                    }
+
+                    // Write back to image
+                    var span = imageData.AsSpan(offset, 32);
+                    entryBuffer.AsSpan().CopyTo(span);
+
+                    System.Diagnostics.Debug.WriteLine($"  Renamed '{oldName}' to '{newName}' (FAT name: '{fatName}')");
+                    return;
+                }
+            }
+
+            throw new FileNotFoundException($"Entry '{oldName}' not found.");
         }
 
         private void FreeClusterChain(uint firstCluster, Bpb bpb)

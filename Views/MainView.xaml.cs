@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
@@ -7,6 +8,7 @@ using System.Windows.Data;
 using System.Windows.Input;
 using NetImage.Models;
 using NetImage.ViewModels;
+using RenameRequestEventArgs = NetImage.ViewModels.RenameRequestEventArgs;
 
 namespace NetImage.Views
 {
@@ -50,6 +52,9 @@ namespace NetImage.Views
                 vm.ExtractError += OnExtractError;
                 vm.SaveError += OnSaveError;
                 vm.CloseImageRequested += OnCloseImageRequested;
+                vm.RenameRequested += OnRenameRequested;
+                vm.RenameError += OnRenameError;
+                vm.TreeViewBuilt += OnTreeViewBuilt;
             }
 
             DataContextChanged += (_, e) =>
@@ -73,6 +78,9 @@ namespace NetImage.Views
                     newVm.ExtractError += OnExtractError;
                     newVm.SaveError += OnSaveError;
                     newVm.CloseImageRequested += OnCloseImageRequested;
+                    newVm.RenameRequested += OnRenameRequested;
+                    newVm.RenameError += OnRenameError;
+                    newVm.TreeViewBuilt += OnTreeViewBuilt;
                 }
             };
         }
@@ -205,6 +213,135 @@ namespace NetImage.Views
         private void OnSaveError(object? sender, string message)
         {
             MessageBox.Show(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+
+        private void OnRenameRequested(object? sender, RenameRequestEventArgs e)
+        {
+            var dialog = new RenameDialog { Owner = this };
+            dialog.SetItemInfo(e.Item.Name, e.Item.IsFolder);
+            if (dialog.ShowDialog() == true && !string.IsNullOrEmpty(dialog.NewName))
+            {
+                if (DataContext is MainViewModel vm)
+                {
+                    vm.PerformRename(e.Item, dialog.NewName);
+                }
+            }
+        }
+
+        private void OnRenameError(object? sender, string message)
+        {
+            MessageBox.Show(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+
+        private void OnTreeViewBuilt(object? sender, EventArgs e)
+        {
+            // Force expand the current folder in the tree view after it's been rebuilt
+            // Use multiple Dispatcher invokes to allow visual tree to materialize between expansions
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (DataContext is MainViewModel vm && vm.CurrentFolder != null)
+                {
+                    ExpandFolderPathInTreeView(MainTreeView, vm.CurrentFolder);
+                }
+            }));
+        }
+
+        /// <summary>
+        /// Expands all parent folders of the target folder by traversing the data model.
+        /// Uses sequential Dispatcher invokes to allow visual tree items to materialize.
+        /// </summary>
+        private void ExpandFolderPathInTreeView(TreeView treeView, TreeItem targetFolder)
+        {
+            // Build the path from root to target by walking parent references
+            var path = new List<TreeItem>();
+            var current = targetFolder;
+            while (current != null)
+            {
+                path.Add(current);
+                // Find parent by searching TreeItems collection
+                current = FindParent(treeView.Items, current);
+            }
+            path.Reverse();
+
+            // Expand each folder in the path sequentially
+            ExpandPathSequentially(treeView, path, 0);
+        }
+
+        private TreeItem? FindParent(IEnumerable items, TreeItem child)
+        {
+            foreach (var item in items)
+            {
+                if (item is TreeItem parent)
+                {
+                    if (parent.Children.Contains(child))
+                        return parent;
+                    // Recursively search children
+                    var found = FindParent(parent.Children, child);
+                    if (found != null)
+                        return found;
+                }
+            }
+            return null;
+        }
+
+        private void ExpandPathSequentially(TreeView treeView, List<TreeItem> path, int index)
+        {
+            if (index >= path.Count)
+                return;
+
+            var targetItem = path[index];
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                // Find the TreeViewItem for this data item
+                var treeViewItem = FindTreeViewItemForItem(treeView, targetItem);
+                if (treeViewItem != null)
+                {
+                    treeViewItem.IsExpanded = true;
+                }
+
+                // Schedule the next expansion after this one completes
+                if (index < path.Count - 1)
+                {
+                    Dispatcher.BeginInvoke(new Action(() =>
+                        ExpandPathSequentially(treeView, path, index + 1)));
+                }
+            }));
+        }
+
+        private TreeViewItem? FindTreeViewItemForItem(DependencyObject parent, TreeItem targetDataItem)
+        {
+            for (int i = 0; i < System.Windows.Media.VisualTreeHelper.GetChildrenCount(parent); i++)
+            {
+                var child = System.Windows.Media.VisualTreeHelper.GetChild(parent, i);
+
+                if (child is TreeViewItem treeViewItem)
+                {
+                    if (treeViewItem.DataContext == targetDataItem)
+                        return treeViewItem;
+
+                    // Search in children
+                    var found = FindTreeViewItemForItem(treeViewItem, targetDataItem);
+                    if (found != null)
+                        return found;
+                }
+                else if (child is Panel panel)
+                {
+                    for (int j = 0; j < System.Windows.Media.VisualTreeHelper.GetChildrenCount(panel); j++)
+                    {
+                        var grandChild = System.Windows.Media.VisualTreeHelper.GetChild(panel, j);
+                        if (grandChild is TreeViewItem gv)
+                        {
+                            if (gv.DataContext == targetDataItem)
+                                return gv;
+                            var found = FindTreeViewItemForItem(gv, targetDataItem);
+                            if (found != null)
+                                return found;
+                        }
+                    }
+                }
+            }
+            return null;
         }
 
         private void OnCloseImageRequested(object? sender, CloseImageRequestEventArgs e)

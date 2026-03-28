@@ -44,6 +44,10 @@ namespace NetImage.ViewModels
         public event EventHandler<string>? SaveError;
         public event EventHandler<CloseImageRequestEventArgs>? CloseImageRequested;
 
+        public event EventHandler<RenameRequestEventArgs>? RenameRequested;
+        public event EventHandler<string>? RenameError;
+        public event EventHandler? TreeViewBuilt;
+
         public MainViewModel()
         {
             NewCommand = new ActionCommand(ExecuteNew);
@@ -55,6 +59,7 @@ namespace NetImage.ViewModels
             DeleteCommand = new ActionCommand(ExecuteDelete) { Enabled = false };
             ExtractCommand = new ActionCommand(ExecuteExtract) { Enabled = false };
             EditCommand = new ActionCommand(ExecuteEdit) { Enabled = false };
+            RenameCommand = new ActionCommand(ExecuteRename) { Enabled = false };
             SaveCommand = new ActionCommand(ExecuteSave) { Enabled = false };
             SaveAsCommand = new ActionCommand(ExecuteSaveAs) { Enabled = false };
             TreeItems = new ObservableCollection<TreeItem>();
@@ -71,6 +76,7 @@ namespace NetImage.ViewModels
         public ActionCommand DeleteCommand { get; }
         public ActionCommand ExtractCommand { get; }
         public ActionCommand EditCommand { get; }
+        public ActionCommand RenameCommand { get; }
         public ActionCommand SaveCommand { get; }
         public ActionCommand SaveAsCommand { get; }
         public string WindowTitle => $"{ApplicationName} {GetApplicationVersion()}";
@@ -362,7 +368,10 @@ namespace NetImage.ViewModels
 
         private void BuildTreeView()
         {
+            var currentFolderPath = GetFolderPathToRestore();
+
             TreeItems.Clear();
+            ClearSelectedItems();
             CurrentFolder = null;
             SelectedItem = null;
 
@@ -404,11 +413,68 @@ namespace NetImage.ViewModels
                 }
             }
 
-            rootNode.IsSelected = true;
             rootNode.IsExpanded = true;
             TreeItems.Add(rootNode);
-            SelectedItem = rootNode;
-            CurrentFolder = rootNode;
+
+            var restoredFolder = ResolveFolderToRestore(nodeByPath, currentFolderPath);
+            ExpandFolderPath(nodeByPath, restoredFolder.Path);
+            CurrentFolder = restoredFolder;
+            SelectedItem = restoredFolder;
+            restoredFolder.IsSelected = true;
+            restoredFolder.IsExpanded = true;
+
+            // Notify the view that the tree has been rebuilt
+            TreeViewBuilt?.Invoke(this, EventArgs.Empty);
+        }
+
+        private string? GetFolderPathToRestore()
+        {
+            if (_currentFolder != null)
+                return _currentFolder.Path;
+
+            if (_selectedItem == null)
+                return null;
+
+            return _selectedItem.IsFolder ? _selectedItem.Path : GetParentFolderPath(_selectedItem.Path);
+        }
+
+        private static TreeItem ResolveFolderToRestore(IReadOnlyDictionary<string, TreeItem> nodeByPath, string? folderPath)
+        {
+            var candidatePath = folderPath;
+            while (candidatePath != null)
+            {
+                if (nodeByPath.TryGetValue(candidatePath, out var folder))
+                    return folder;
+
+                candidatePath = GetParentFolderPath(candidatePath);
+            }
+
+            return nodeByPath[string.Empty];
+        }
+
+        private static void ExpandFolderPath(IReadOnlyDictionary<string, TreeItem> nodeByPath, string folderPath)
+        {
+            if (string.IsNullOrEmpty(folderPath))
+                return;
+
+            var pathParts = folderPath.Split('\\');
+            var pathSoFar = string.Empty;
+            foreach (var part in pathParts)
+            {
+                pathSoFar = string.IsNullOrEmpty(pathSoFar) ? part : $"{pathSoFar}\\{part}";
+                if (nodeByPath.TryGetValue(pathSoFar, out var folder))
+                {
+                    folder.IsExpanded = true;
+                }
+            }
+        }
+
+        private void ClearSelectedItems()
+        {
+            while (_selectedItems.Count > 0)
+            {
+                _selectedItems.RemoveAt(0);
+            }
         }
 
         private async void ExecuteClose(object? parameter)
@@ -872,6 +938,33 @@ namespace NetImage.ViewModels
             }
         }
 
+        private void ExecuteRename(object? parameter)
+        {
+            if (_imageWorker == null || _selectedItem == null || IsBusy)
+                return;
+
+            RenameRequested?.Invoke(this, new RenameRequestEventArgs(_selectedItem));
+        }
+
+        public void PerformRename(TreeItem item, string newName)
+        {
+            if (_imageWorker == null)
+                return;
+
+            try
+            {
+                _imageWorker.RenameEntry(item.Path, newName);
+                BuildTreeView();
+                RefreshDiskSpaceText();
+                HasUnsavedChanges = true;
+                StatusText = $"Renamed '{item.Name}' to '{newName}'";
+            }
+            catch (Exception ex)
+            {
+                RenameError?.Invoke(this, $"Failed to rename: {ex.Message}");
+            }
+        }
+
         private async void ExecuteSave(object? parameter)
         {
             if (_imageWorker == null || IsBusy)
@@ -939,12 +1032,16 @@ namespace NetImage.ViewModels
                 return string.Empty;
 
             // A folder has no Size (Size == null)
-            if (_selectedItem.Size == null)
+            if (_selectedItem.IsFolder)
                 return _selectedItem.Path;
 
-            // A file: strip the last segment to get the parent folder
-            var lastSlash = _selectedItem.Path.LastIndexOf('\\');
-            return lastSlash >= 0 ? _selectedItem.Path[..lastSlash] : string.Empty;
+            return GetParentFolderPath(_selectedItem.Path) ?? string.Empty;
+        }
+
+        private static string? GetParentFolderPath(string path)
+        {
+            var lastSlash = path.LastIndexOf('\\');
+            return lastSlash >= 0 ? path[..lastSlash] : string.Empty;
         }
 
         private async Task RunBusyOperationAsync(string statusText, Func<Task> operation, bool isIndeterminate = true, string? progressText = null)
@@ -1028,6 +1125,10 @@ namespace NetImage.ViewModels
                                   !_selectedItem.IsFolder &&
                                   !IsBinaryFile(_selectedItem.Name) &&
                                   !IsBusy;
+            RenameCommand.Enabled = hasLoadedImage &&
+                                    _selectedItem != null &&
+                                    _selectedItems.Count == 1 &&
+                                    !IsBusy;
             SaveCommand.Enabled = hasLoadedImage && _canSaveCurrentImage && !IsBusy;
             SaveAsCommand.Enabled = hasLoadedImage && !IsBusy;
         }
