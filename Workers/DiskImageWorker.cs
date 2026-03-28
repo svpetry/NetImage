@@ -2203,5 +2203,40 @@ namespace NetImage.Workers
                 _progress?.Report(new OperationProgress(_totalBytes, _totalBytes, string.Empty));
             }
         }
+
+        /// <summary>
+        /// Returns a copy of the current image data.
+        /// </summary>
+        public byte[]? GetImageData()
+        {
+            if (_imageData == null)
+                return null;
+            return (byte[])_imageData.Clone();
+        }
+
+        /// <summary>
+        /// Returns the partition start sector (0 for raw FAT images, >0 for partitioned images).
+        /// </summary>
+        public uint GetPartitionStartSector()
+        {
+            return _partitionStartSector;
+        }
+
+        /// <summary>
+        /// Updates the boot sector at the specified byte offset.
+        /// </summary>
+        /// <param name="offset">Byte offset where the boot sector starts.</param>
+        /// <param name="bootSector">The 512-byte boot sector data.</param>
+        public void UpdateBootSector(int offset, byte[] bootSector)
+        {
+            if (_imageData == null)
+                throw new InvalidOperationException("No image data loaded.");
+            if (bootSector == null || bootSector.Length != 512)
+                throw new ArgumentException("Boot sector must be exactly 512 bytes.");
+            if (offset < 0 || offset + 512 > _imageData.Length)
+                throw new ArgumentOutOfRangeException(nameof(offset), "Boot sector offset is out of bounds.");
+
+            Array.Copy(bootSector, 0, _imageData, offset, 512);
+        }
     }
 }

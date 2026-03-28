@@ -60,6 +60,7 @@ namespace NetImage.ViewModels
             ExtractCommand = new ActionCommand(ExecuteExtract) { Enabled = false };
             EditCommand = new ActionCommand(ExecuteEdit) { Enabled = false };
             RenameCommand = new ActionCommand(ExecuteRename) { Enabled = false };
+            BootSectorCommand = new ActionCommand(ExecuteBootSector) { Enabled = false };
             SaveCommand = new ActionCommand(ExecuteSave) { Enabled = false };
             SaveAsCommand = new ActionCommand(ExecuteSaveAs) { Enabled = false };
             TreeItems = new ObservableCollection<TreeItem>();
@@ -77,6 +78,7 @@ namespace NetImage.ViewModels
         public ActionCommand ExtractCommand { get; }
         public ActionCommand EditCommand { get; }
         public ActionCommand RenameCommand { get; }
+        public ActionCommand BootSectorCommand { get; }
         public ActionCommand SaveCommand { get; }
         public ActionCommand SaveAsCommand { get; }
         public string WindowTitle => $"{ApplicationName} {GetApplicationVersion()}";
@@ -965,6 +967,68 @@ namespace NetImage.ViewModels
             }
         }
 
+        private async void ExecuteBootSector(object? parameter)
+        {
+            if (_imageWorker == null || IsBusy)
+                return;
+
+            var worker = _imageWorker;
+
+            // Get the boot sector from the image data
+            byte[] bootSector = await Task.Run(() =>
+            {
+                var imageData = worker.GetImageData();
+                if (imageData == null || imageData.Length < 512)
+                    throw new InvalidOperationException("Image is too small to contain a boot sector.");
+
+                // Check if this is a partitioned image (MBR)
+                long partitionStartSector = worker.GetPartitionStartSector();
+                long bootSectorOffset = partitionStartSector * 512;
+
+                if (bootSectorOffset + 512 > imageData.Length)
+                    throw new InvalidOperationException("Boot sector is out of bounds.");
+
+                var bs = new byte[512];
+                Array.Copy(imageData, (int)bootSectorOffset, bs, 0, 512);
+                return bs;
+            });
+
+            if (bootSector == null)
+            {
+                StatusText = "Could not read boot sector.";
+                return;
+            }
+
+            // Open boot sector editor dialog
+            var dialog = new BootSectorDialog();
+            dialog.Owner = System.Windows.Application.Current.MainWindow;
+            dialog.SetBootSector(bootSector);
+
+            if (dialog.ShowDialog() != true || dialog.EditedBootSector == null)
+                return;
+
+            // Save the edited boot sector back to the image
+            try
+            {
+                await RunBusyOperationAsync(
+                    "Saving boot sector...",
+                    () => Task.Run(() =>
+                    {
+                        long partitionStartSector = worker.GetPartitionStartSector();
+                        long bootSectorOffset = partitionStartSector * 512;
+                        worker.UpdateBootSector((int)bootSectorOffset, dialog.EditedBootSector);
+                    }),
+                    progressText: "Boot Sector");
+
+                HasUnsavedChanges = true;
+                StatusText = "Boot sector saved.";
+            }
+            catch (Exception ex)
+            {
+                StatusText = $"Failed to save boot sector: {ex.Message}";
+            }
+        }
+
         private async void ExecuteSave(object? parameter)
         {
             if (_imageWorker == null || IsBusy)
@@ -1129,6 +1193,7 @@ namespace NetImage.ViewModels
                                     _selectedItem != null &&
                                     _selectedItems.Count == 1 &&
                                     !IsBusy;
+            BootSectorCommand.Enabled = hasLoadedImage && !IsBusy;
             SaveCommand.Enabled = hasLoadedImage && _canSaveCurrentImage && !IsBusy;
             SaveAsCommand.Enabled = hasLoadedImage && !IsBusy;
         }
