@@ -25,6 +25,22 @@ namespace NetImage.Views
             EventManager.RegisterClassHandler(typeof(TreeViewItem), FrameworkElement.LoadedEvent, new RoutedEventHandler(OnTreeViewItemLoaded));
             EventManager.RegisterClassHandler(typeof(GridViewColumnHeader), MouseLeftButtonUpEvent, new MouseButtonEventHandler(GridViewHeader_MouseLeftButtonUp));
 
+            // Set default sort: folders first, then by name
+            ApplyDefaultSort();
+        }
+
+        private void ApplyDefaultSort()
+        {
+            var items = MainListView.Items;
+            if (items != null)
+            {
+                items.SortDescriptions.Add(new SortDescription("IsFolder", ListSortDirection.Descending));
+            }
+        }
+
+        protected override void OnInitialized(EventArgs e)
+        {
+            base.OnInitialized(e);
             if (DataContext is MainViewModel vm)
             {
                 vm.CreateFolderRequested += OnCreateFolderRequested;
@@ -174,6 +190,9 @@ namespace NetImage.Views
             if (items != null)
             {
                 items.SortDescriptions.Clear();
+                // Always sort folders to the top first (IsFolder descending: true > false)
+                items.SortDescriptions.Add(new SortDescription("IsFolder", ListSortDirection.Descending));
+                // Then apply the user's chosen sort criteria
                 items.SortDescriptions.Add(new SortDescription(sortProp, _currentSortDirection));
             }
         }

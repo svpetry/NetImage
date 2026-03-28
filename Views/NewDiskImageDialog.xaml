@@ -17,13 +17,13 @@
             <!-- Floppy Disk Tab -->
             <TabItem Header="Floppy Disk">
                 <StackPanel Margin="10">
-                    <RadioButton Content="160 KB (512 bytes/sector)" IsChecked="True" Tag="163840" GroupName="FloppySize"/>
+                    <RadioButton Content="160 KB (512 bytes/sector)" Tag="163840" GroupName="FloppySize"/>
                     <RadioButton Content="180 KB (512 bytes/sector)" Tag="184320" GroupName="FloppySize"/>
                     <RadioButton Content="320 KB (512 bytes/sector)" Tag="327680" GroupName="FloppySize"/>
                     <RadioButton Content="360 KB (512 bytes/sector)" Tag="368640" GroupName="FloppySize"/>
                     <RadioButton Content="720 KB (512 bytes/sector)" Tag="737280" GroupName="FloppySize"/>
                     <RadioButton Content="1.2 MB (512 bytes/sector)" Tag="1245184" GroupName="FloppySize"/>
-                    <RadioButton Content="1.44 MB (512 bytes/sector)" Tag="1474560" GroupName="FloppySize"/>
+                    <RadioButton Content="1.44 MB (512 bytes/sector)" IsChecked="True" Tag="1474560" GroupName="FloppySize"/>
                     <RadioButton Content="2.88 MB (512 bytes/sector)" Tag="3006476" GroupName="FloppySize"/>
                 </StackPanel>
             </TabItem>

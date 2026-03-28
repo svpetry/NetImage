@@ -1925,9 +1925,6 @@ namespace NetImage.Workers
             uint sectorsPerTrack = 18; // Standard for high-density floppies
             uint headsPerCylinder = 2; // Standard for high-density floppies
 
-            // Calculate root directory size
-            uint rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
-
             // Build boot sector
             var bootSector = _imageData.AsSpan(0, 512);
 
@@ -2063,10 +2060,6 @@ namespace NetImage.Workers
         {
             uint rootDirStart = reservedSectors + (numFats * sectorsPerFat);
             uint rootDirOffset = rootDirStart * bytesPerSector;
-
-            // Clear root directory (already zeroed, but be explicit)
-            uint rootDirSize = rootDirEntries * 32;
-            // Already zeroed from new byte[]
 
             // Add volume label if specified
             if (!string.IsNullOrEmpty(volumeLabel))
