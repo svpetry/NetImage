@@ -1686,6 +1686,48 @@ namespace NetImage.Workers
             }
         }
 
+        public enum SectorType
+        {
+            BootSector,
+            PartitionTable,
+            FatTable,
+            RootDirectory,
+            Allocated,
+            Free,
+            Reserved
+        }
+
+        public class SectorMapInfo
+        {
+            public SectorType[] SectorTypes { get; set; } = Array.Empty<SectorType>();
+            public int TotalSectors { get; set; }
+            public int AllocatedSectors { get; set; }
+            public int FreeSectors { get; set; }
+            public int TotalAllocatedSectors { get; set; }
+            public int TotalFreeSectors { get; set; }
+            public int MaxSectorsToShow { get; set; } = 50000;
+            public bool HasPartition { get; set; }
+            public uint PartitionStartSector { get; set; }
+            public uint BytesPerSector { get; set; } = 512;
+            public byte SectorsPerCluster { get; set; }
+        }
+
+        public class ClusterMapInfo
+        {
+            public SectorType[] ClusterTypes { get; set; } = Array.Empty<SectorType>();
+            public int TotalClusters { get; set; }
+            public int AllocatedClusters { get; set; }
+            public int FreeClusters { get; set; }
+            public int TotalAllocatedClusters { get; set; }
+            public int TotalFreeClusters { get; set; }
+            public int MaxClustersToShow { get; set; } = 10000;
+            public bool HasPartition { get; set; }
+            public uint PartitionStartSector { get; set; }
+            public uint BytesPerSector { get; set; } = 512;
+            public byte SectorsPerCluster { get; set; }
+            public int TotalSectors { get; set; }
+        }
+
         public enum FatType
         {
             Fat12,
@@ -2237,6 +2279,279 @@ namespace NetImage.Workers
                 throw new ArgumentOutOfRangeException(nameof(offset), "Boot sector offset is out of bounds.");
 
             Array.Copy(bootSector, 0, _imageData, offset, 512);
+        }
+
+        /// <summary>
+        /// Analyzes the disk image and returns sector map information.
+        /// </summary>
+        public SectorMapInfo GetSectorMap()
+        {
+            var info = new SectorMapInfo();
+
+            if (_imageData == null || !_isLoaded)
+                return info;
+
+            var bytesPerSector = 512u;
+            var totalSectors = (_imageData.Length + 511) / 512;
+            info.TotalSectors = totalSectors;
+            info.HasPartition = _partitionStartSector > 0;
+            info.PartitionStartSector = _partitionStartSector;
+
+            // Initialize all sectors as reserved
+            info.SectorTypes = new SectorType[Math.Min(totalSectors, info.MaxSectorsToShow)];
+            for (int i = 0; i < info.SectorTypes.Length; i++)
+            {
+                info.SectorTypes[i] = SectorType.Reserved;
+            }
+
+            // Check if we have a valid FAT filesystem
+            if (_fatType == null)
+            {
+                // Mark all as free if no valid filesystem
+                for (int i = 0; i < info.SectorTypes.Length; i++)
+                {
+                    info.SectorTypes[i] = SectorType.Free;
+                }
+                info.FreeSectors = info.SectorTypes.Length;
+                info.TotalFreeSectors = totalSectors;
+                return info;
+            }
+
+            var bootSectorOffset = _partitionStartSector * 512;
+            if (bootSectorOffset + 512 > _imageData.Length)
+                return info;
+
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, (int)bootSectorOffset, 512));
+            info.BytesPerSector = bpb.BytesPerSector;
+            info.SectorsPerCluster = bpb.SectorsPerCluster;
+            bytesPerSector = bpb.BytesPerSector;
+
+            // Mark MBR sector if present (sector 0)
+            if (_partitionStartSector == 0)
+            {
+                // Raw FAT image - first sector is boot sector
+                info.SectorTypes[0] = SectorType.BootSector;
+            }
+            else
+            {
+                // Partitioned image - sector 0 contains MBR/partition table
+                info.SectorTypes[0] = SectorType.PartitionTable;
+            }
+
+            // Calculate filesystem structure
+            var partitionSectors = totalSectors - _partitionStartSector;
+            var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
+            var rootDirStartSector = fatStartSector + (bpb.NumFats * bpb.SectorsPerFat);
+            var rootDirSectors = GetRootDirSizeSectors(bpb);
+            var dataStartSector = rootDirStartSector + rootDirSectors;
+            var dataAreaSectors = Math.Max(0, totalSectors - (int)dataStartSector);
+            var totalDataClusters = bpb.SectorsPerCluster == 0 ? 0 : dataAreaSectors / bpb.SectorsPerCluster;
+            var usableDataSectors = totalDataClusters * bpb.SectorsPerCluster;
+            var dataEndSector = dataStartSector + (uint)usableDataSectors;
+
+            // Helper to check if sector index is within display bounds
+            bool IsInDisplayBounds(uint sector) => sector < (uint)info.SectorTypes.Length;
+
+            // Mark reserved sectors (including boot sector within partition)
+            for (uint s = _partitionStartSector; s < _partitionStartSector + bpb.ReservedSectors && s < totalSectors; s++)
+            {
+                if (!IsInDisplayBounds(s)) break;
+                if (s == _partitionStartSector)
+                {
+                    info.SectorTypes[s] = SectorType.BootSector;
+                }
+                else
+                {
+                    info.SectorTypes[s] = SectorType.Reserved;
+                }
+            }
+
+            // Mark FAT sectors
+            for (uint fatNum = 0; fatNum < bpb.NumFats; fatNum++)
+            {
+                for (uint s = fatStartSector + (fatNum * bpb.SectorsPerFat);
+                     s < fatStartSector + ((fatNum + 1) * bpb.SectorsPerFat) && s < totalSectors; s++)
+                {
+                    if (!IsInDisplayBounds(s)) break;
+                    info.SectorTypes[s] = SectorType.FatTable;
+                }
+            }
+
+            // Mark root directory sectors
+            for (uint s = rootDirStartSector; s < rootDirStartSector + rootDirSectors && s < totalSectors; s++)
+            {
+                if (!IsInDisplayBounds(s)) break;
+                info.SectorTypes[s] = SectorType.RootDirectory;
+            }
+
+            // Calculate allocated data sectors from FAT
+            var allocatedClusters = GetAllocatedClusters(bpb);
+
+            foreach (var cluster in allocatedClusters)
+            {
+                var startSector = dataStartSector + (cluster - 2) * bpb.SectorsPerCluster;
+                if (startSector >= dataEndSector)
+                {
+                    continue;
+                }
+
+                info.TotalAllocatedSectors += (int)Math.Min(
+                    bpb.SectorsPerCluster,
+                    dataEndSector - startSector);
+
+                for (uint i = 0; i < bpb.SectorsPerCluster && startSector + i < dataEndSector; i++)
+                {
+                    if (!IsInDisplayBounds(startSector + i)) break;
+                    info.SectorTypes[startSector + i] = SectorType.Allocated;
+                }
+            }
+
+            info.TotalFreeSectors = Math.Max(0, usableDataSectors - info.TotalAllocatedSectors);
+
+            // Mark remaining sectors in data area as free (before counting)
+            for (uint s = dataStartSector; s < dataEndSector; s++)
+            {
+                if (!IsInDisplayBounds(s)) break;
+                if (info.SectorTypes[s] == SectorType.Reserved)
+                {
+                    info.SectorTypes[s] = SectorType.Free;
+                }
+            }
+
+            // Count sector types
+            foreach (var type in info.SectorTypes)
+            {
+                if (type == SectorType.Allocated)
+                    info.AllocatedSectors++;
+                else if (type == SectorType.Free)
+                    info.FreeSectors++;
+            }
+
+            return info;
+        }
+
+        /// <summary>
+        /// Analyzes the disk image and returns cluster map information.
+        /// </summary>
+        public ClusterMapInfo GetClusterMap()
+        {
+            var info = new ClusterMapInfo();
+
+            if (_imageData == null || !_isLoaded)
+                return info;
+
+            var totalSectors = (_imageData.Length + 511) / 512;
+            info.TotalSectors = totalSectors;
+            info.HasPartition = _partitionStartSector > 0;
+            info.PartitionStartSector = _partitionStartSector;
+
+            // Check if we have a valid FAT filesystem
+            if (_fatType == null)
+            {
+                return info;
+            }
+
+            var bootSectorOffset = _partitionStartSector * 512;
+            if (bootSectorOffset + 512 > _imageData.Length)
+                return info;
+
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, (int)bootSectorOffset, 512));
+            info.BytesPerSector = bpb.BytesPerSector;
+            info.SectorsPerCluster = bpb.SectorsPerCluster;
+
+            // Calculate filesystem structure based on actual image size
+            var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
+            var rootDirStartSector = fatStartSector + (bpb.NumFats * bpb.SectorsPerFat);
+            var rootDirSectors = GetRootDirSizeSectors(bpb);
+            var dataStartSector = rootDirStartSector + rootDirSectors;
+            var dataSectors = totalSectors - dataStartSector;
+            if (dataSectors < 0) dataSectors = 0;
+
+            var totalClusters = (int)(dataSectors / bpb.SectorsPerCluster);
+            info.TotalClusters = totalClusters;
+            var clustersToShow = Math.Min(totalClusters, info.MaxClustersToShow);
+
+            // Initialize all clusters as free
+            info.ClusterTypes = new SectorType[clustersToShow];
+            for (int i = 0; i < clustersToShow; i++)
+            {
+                info.ClusterTypes[i] = SectorType.Free;
+            }
+
+            // Get allocated clusters and mark them
+            var allocatedClusters = GetAllocatedClusters(bpb);
+            foreach (var cluster in allocatedClusters)
+            {
+                // Cluster numbers start at 2, array index starts at 0
+                var index = (int)(cluster - 2);
+                if (index < info.ClusterTypes.Length)
+                {
+                    info.ClusterTypes[index] = SectorType.Allocated;
+                    info.AllocatedClusters++;
+                }
+                info.TotalAllocatedClusters++;
+            }
+
+            // Count free clusters (both display and total)
+            info.FreeClusters = (int)(clustersToShow - info.AllocatedClusters);
+            info.TotalFreeClusters = info.TotalClusters - info.TotalAllocatedClusters;
+
+            return info;
+        }
+
+        /// <summary>
+        /// Returns a list of allocated cluster numbers from the FAT.
+        /// </summary>
+        private List<uint> GetAllocatedClusters(Bpb bpb)
+        {
+            var allocated = new List<uint>();
+            var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
+            var fatStartOffset = (int)(fatStartSector * bpb.BytesPerSector);
+            var fatSize = (int)(bpb.SectorsPerFat * bpb.BytesPerSector);
+
+            // Calculate actual cluster count based on image size
+            var totalSectors = (_imageData!.Length + 511) / 512;
+            var rootDirStartSector = fatStartSector + (bpb.NumFats * bpb.SectorsPerFat);
+            var rootDirSectors = GetRootDirSizeSectors(bpb);
+            var dataStartSector = rootDirStartSector + rootDirSectors;
+            var dataSectors = totalSectors - dataStartSector;
+            if (dataSectors < 0) dataSectors = 0;
+            var actualClusterCount = (uint)(dataSectors / bpb.SectorsPerCluster) + 2;
+
+            // Use the larger of BPB cluster count or actual cluster count
+            var clusterCount = Math.Max(bpb.ClusterCount + 2, actualClusterCount);
+
+            for (uint cluster = 2; cluster < clusterCount; cluster++)
+            {
+                uint fatValue;
+
+                if (IsFat12(bpb))
+                {
+                    var fatEntryStart = fatStartOffset + (int)(cluster * 3 / 2);
+                    if (fatEntryStart + 2 > _imageData!.Length)
+                        break;
+
+                    var rawValue = _imageData[fatEntryStart] | (_imageData[fatEntryStart + 1] << 8);
+                    fatValue = (uint)((cluster & 1) == 0 ? (rawValue & 0xFFF) : (rawValue >> 4));
+                }
+                else // FAT16
+                {
+                    var fatEntryStart = fatStartOffset + (int)(cluster * 2);
+                    if (fatEntryStart + 2 > _imageData!.Length)
+                        break;
+
+                    fatValue = BitConverter.ToUInt16(_imageData.AsSpan(fatEntryStart, 2));
+                }
+
+                // Check if this cluster is allocated (not free)
+                // A cluster is allocated if its FAT entry is non-zero
+                if (fatValue != 0)
+                {
+                    allocated.Add(cluster);
+                }
+            }
+
+            return allocated;
         }
     }
 }

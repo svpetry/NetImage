@@ -1065,6 +1065,24 @@ namespace NetImage.Tests.Workers
             Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBytesBeforeAdd - SectorSize));
         }
 
+        [Test]
+        public void GetSectorMap_WithLargeImage_ReportsTotalFreeAndAllocatedSectorsBeyondDisplayLimit()
+        {
+            // Arrange
+            var worker = new DiskImageWorker("dummy.img");
+            worker.CreateHardDiskImage(100, 16, 63, "DISK");
+            worker.AddFile("ONEBYTE.TXT", new byte[] { 0x01 });
+
+            // Act
+            var sectorMap = worker.GetSectorMap();
+
+            // Assert
+            Assert.That(sectorMap.TotalSectors, Is.GreaterThan(sectorMap.MaxSectorsToShow));
+            Assert.That(sectorMap.TotalAllocatedSectors, Is.EqualTo((worker.GetTotalBytes() - worker.GetFreeBytes()) / sectorMap.BytesPerSector));
+            Assert.That(sectorMap.TotalFreeSectors, Is.EqualTo(worker.GetFreeBytes() / sectorMap.BytesPerSector));
+            Assert.That(sectorMap.TotalFreeSectors, Is.GreaterThan(sectorMap.FreeSectors));
+        }
+
         #endregion
 
         #region SaveAsync Tests

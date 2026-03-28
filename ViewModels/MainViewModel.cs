@@ -61,6 +61,7 @@ namespace NetImage.ViewModels
             EditCommand = new ActionCommand(ExecuteEdit) { Enabled = false };
             RenameCommand = new ActionCommand(ExecuteRename) { Enabled = false };
             BootSectorCommand = new ActionCommand(ExecuteBootSector) { Enabled = false };
+            ImageMapCommand = new ActionCommand(ExecuteImageMap) { Enabled = false };
             SaveCommand = new ActionCommand(ExecuteSave) { Enabled = false };
             SaveAsCommand = new ActionCommand(ExecuteSaveAs) { Enabled = false };
             TreeItems = new ObservableCollection<TreeItem>();
@@ -79,6 +80,7 @@ namespace NetImage.ViewModels
         public ActionCommand EditCommand { get; }
         public ActionCommand RenameCommand { get; }
         public ActionCommand BootSectorCommand { get; }
+        public ActionCommand ImageMapCommand { get; }
         public ActionCommand SaveCommand { get; }
         public ActionCommand SaveAsCommand { get; }
         public string WindowTitle => $"{ApplicationName} {GetApplicationVersion()}";
@@ -1029,6 +1031,17 @@ namespace NetImage.ViewModels
             }
         }
 
+        private void ExecuteImageMap(object? parameter)
+        {
+            if (_imageWorker == null || IsBusy)
+                return;
+
+            var dialog = new ImageMapDialog();
+            dialog.Owner = System.Windows.Application.Current.MainWindow;
+            dialog.LoadImage(_imageWorker);
+            dialog.ShowDialog();
+        }
+
         private async void ExecuteSave(object? parameter)
         {
             if (_imageWorker == null || IsBusy)
@@ -1194,6 +1207,7 @@ namespace NetImage.ViewModels
                                     _selectedItems.Count == 1 &&
                                     !IsBusy;
             BootSectorCommand.Enabled = hasLoadedImage && !IsBusy;
+            ImageMapCommand.Enabled = hasLoadedImage && !IsBusy;
             SaveCommand.Enabled = hasLoadedImage && _canSaveCurrentImage && !IsBusy;
             SaveAsCommand.Enabled = hasLoadedImage && !IsBusy;
         }
