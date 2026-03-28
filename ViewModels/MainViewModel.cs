@@ -1024,6 +1024,7 @@ namespace NetImage.ViewModels
             ExtractCommand.Enabled = hasLoadedImage && hasSelection && !IsBusy;
             EditCommand.Enabled = hasLoadedImage &&
                                   _selectedItem != null &&
+                                  _selectedItems.Count == 1 &&
                                   !_selectedItem.IsFolder &&
                                   !IsBinaryFile(_selectedItem.Name) &&
                                   !IsBusy;
