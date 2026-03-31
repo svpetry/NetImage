@@ -55,6 +55,13 @@ namespace NetImage.Views
                 vm.RenameRequested += OnRenameRequested;
                 vm.RenameError += OnRenameError;
                 vm.TreeViewBuilt += OnTreeViewBuilt;
+
+                // Handle command-line file path (for file associations)
+                var filePath = App.CommandLineFilePath;
+                if (!string.IsNullOrEmpty(filePath) && System.IO.File.Exists(filePath))
+                {
+                    _ = vm.OpenImageFileAsync(filePath);
+                }
             }
 
             DataContextChanged += (_, e) =>

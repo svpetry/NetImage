@@ -339,35 +339,43 @@ namespace NetImage.ViewModels
 
             if (openFileDialog.ShowDialog() == true)
             {
-                var worker = new DiskImageWorker(openFileDialog.FileName);
-                try
-                {
-                    await RunBusyOperationAsync(
-                        "Opening image...",
-                        () => Task.Run(async () => await worker.OpenAsync()),
-                        progressText: System.IO.Path.GetFileName(openFileDialog.FileName));
-                }
-                catch (Exception ex)
-                {
-                    StatusText = $"Could not open image: {ex.Message}";
-                    return;
-                }
-
-                if (!worker.IsLoaded)
-                {
-                    StatusText = worker.FilesystemType == DiskImageWorker.FatType.Fat32
-                        ? "FAT32 images are not supported"
-                        : $"Could not open image: {openFileDialog.FileName}";
-                    return;
-                }
-
-                _imageWorker = worker;
-                _canSaveCurrentImage = true;
-                BuildTreeView();
-                RefreshDiskSpaceText();
-                UpdateCommandStates();
-                StatusText = $"Opened: {openFileDialog.FileName}";
+                await OpenImageFileAsync(openFileDialog.FileName);
             }
+        }
+
+        /// <summary>
+        /// Opens an image file by path. Used for command-line arguments and file associations.
+        /// </summary>
+        public async Task OpenImageFileAsync(string filePath)
+        {
+            var worker = new DiskImageWorker(filePath);
+            try
+            {
+                await RunBusyOperationAsync(
+                    "Opening image...",
+                    () => Task.Run(async () => await worker.OpenAsync()),
+                    progressText: System.IO.Path.GetFileName(filePath));
+            }
+            catch (Exception ex)
+            {
+                StatusText = $"Could not open image: {ex.Message}";
+                return;
+            }
+
+            if (!worker.IsLoaded)
+            {
+                StatusText = worker.FilesystemType == DiskImageWorker.FatType.Fat32
+                    ? "FAT32 images are not supported"
+                    : $"Could not open image: {filePath}";
+                return;
+            }
+
+            _imageWorker = worker;
+            _canSaveCurrentImage = true;
+            BuildTreeView();
+            RefreshDiskSpaceText();
+            UpdateCommandStates();
+            StatusText = $"Opened: {filePath}";
         }
 
         private void BuildTreeView()
@@ -1041,6 +1049,7 @@ namespace NetImage.ViewModels
             dialog.LoadImage(_imageWorker);
             dialog.ShowDialog();
         }
+
 
         private async void ExecuteSave(object? parameter)
         {
