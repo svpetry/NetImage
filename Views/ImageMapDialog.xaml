@@ -5,7 +5,7 @@
     <Window.Resources>
         <Style x:Key="LegendItemStyle" TargetType="StackPanel">
             <Setter Property="Orientation" Value="Horizontal"/>
-            <Setter Property="Margin" Value="0,2"/>
+            <Setter Property="Margin" Value="4,2"/>
         </Style>
     </Window.Resources>
     <Grid Margin="10">
@@ -44,6 +44,7 @@
         <!-- Legend and Statistics -->
         <Grid Grid.Row="2" Margin="0,0,0,10">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
@@ -99,8 +100,14 @@
                 </Border>
             </StackPanel>
 
+            <!-- Distribution Pie Chart -->
+            <StackPanel Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <TextBlock Text="Distribution:" FontWeight="Bold" Margin="0,0,0,5" HorizontalAlignment="Center"/>
+                <Canvas x:Name="PieChartCanvas" Width="100" Height="100"/>
+            </StackPanel>
+
             <!-- Statistics -->
-            <StackPanel Grid.Column="1">
+            <StackPanel Grid.Column="2">
                 <TextBlock Text="Statistics:" FontWeight="Bold" Margin="0,0,0,5"/>
                 <Border BorderThickness="1" BorderBrush="#EEEEEE" Background="#FAFAFA" Padding="10">
                     <StackPanel>
