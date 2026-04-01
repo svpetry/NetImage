@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build MSI Installer
+    runs-on: windows-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          
+      - name: Install WiX toolset using dotnet tool
+        run: dotnet tool install --global wix
+
+      - name: Build Application (Single File)
+        run: dotnet publish NetImage.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish_dir
+
+      - name: Build MSI project
+        # In WiX v4, we can build via MSBuild using dotnet build.
+        # We pass target dir as the publish_dir we just created.
+        run: dotnet build NetImage.Setup/NetImage.Setup.wixproj -c Release /p:PublishDir="${{ github.workspace }}\publish_dir\\"
+
+      - name: Rename output
+        run: |
+          Move-Item "NetImage.Setup\bin\x64\Release\en-US\NetImage.msi" "NetImage-${{ github.ref_name }}.msi"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: NetImage-${{ github.ref_name }}.msi
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
