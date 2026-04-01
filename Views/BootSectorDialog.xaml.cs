@@ -81,7 +81,7 @@ namespace NetImage.Views
                     };
 
                     hexBox.PreviewKeyDown += HexBox_PreviewKeyDown;
-                    hexBox.PreviewKeyUp += HexBox_PreviewKeyUp;
+                    hexBox.TextChanged += HexBox_TextChanged;
                     hexBox.GotFocus += HexBox_GotFocus;
                     hexBox.LostFocus += HexBox_LostFocus;
 
@@ -121,7 +121,7 @@ namespace NetImage.Views
                     };
 
                     asciiBox.PreviewKeyDown += AsciiBox_PreviewKeyDown;
-                    asciiBox.PreviewKeyUp += AsciiBox_PreviewKeyUp;
+                    asciiBox.TextChanged += AsciiBox_TextChanged;
                     asciiBox.GotFocus += AsciiBox_GotFocus;
                     asciiBox.LostFocus += AsciiBox_LostFocus;
 
@@ -202,29 +202,30 @@ namespace NetImage.Views
             }
         }
 
-        private void HexBox_PreviewKeyUp(object sender, KeyEventArgs e)
+        private void HexBox_TextChanged(object sender, TextChangedEventArgs e)
         {
-            if (sender is not TextBox box) return;
+            if (sender is not TextBox box || !box.IsFocused) return;
 
-            // Validate hex input
             string text = box.Text;
             if (!IsValidHex(text))
             {
-                // Revert to original value
+                // Revert invalid keypress
                 int offset = GetOffset(box, _hexBoxes);
                 if (offset >= 0 && offset < 512)
                 {
                     box.Text = _bootSector[offset].ToString("X2");
+                    box.SelectAll();
                 }
+                return;
             }
-            else if (text.Length == 2)
+
+            if (text.Length == 2)
             {
                 // Auto-move to next box
                 int offset = GetOffset(box, _hexBoxes);
                 if (offset >= 0 && offset < 511)
                 {
                     _hexBoxes[offset + 1].Focus();
-                    _hexBoxes[offset + 1].SelectAll();
                 }
             }
         }
@@ -265,36 +266,34 @@ namespace NetImage.Views
             }
         }
 
-        private void AsciiBox_PreviewKeyUp(object sender, KeyEventArgs e)
+        private void AsciiBox_TextChanged(object sender, TextChangedEventArgs e)
         {
-            if (sender is not TextBox box || box.Text.Length != 1) return;
+            if (sender is not TextBox box || !box.IsFocused) return;
 
-            char c = box.Text[0];
-            int offset = GetOffset(box, _asciiBoxes);
-            if (offset < 0 || offset >= 512) return;
-
-            // Update the byte value
-            byte b = (byte)c;
-            _bootSector[offset] = b;
-
-            // Update corresponding hex box
-            _hexBoxes[offset].Text = b.ToString("X2");
-
-            // Update ASCII color
-            if (c >= 32 && c <= 126)
+            if (box.Text.Length == 1)
             {
-                box.Foreground = Brushes.White;
-            }
-            else
-            {
-                box.Foreground = Brushes.Gray;
-            }
+                int offset = GetOffset(box, _asciiBoxes);
+                if (offset >= 0 && offset < 512)
+                {
+                    char c = box.Text[0];
+                    byte b = (byte)c;
+                    _bootSector[offset] = b;
+                    _hexBoxes[offset].Text = b.ToString("X2");
 
-            // Auto-move to next box
-            if (offset < 511)
-            {
-                _asciiBoxes[offset + 1].Focus();
-                _asciiBoxes[offset + 1].SelectAll();
+                    if (c >= 32 && c <= 126)
+                    {
+                        box.Foreground = Brushes.White;
+                    }
+                    else
+                    {
+                        box.Foreground = Brushes.Gray;
+                    }
+
+                    if (offset < 511)
+                    {
+                        _asciiBoxes[offset + 1].Focus();
+                    }
+                }
             }
         }
 
@@ -302,6 +301,7 @@ namespace NetImage.Views
         {
             if (sender is TextBox box)
             {
+                box.Background = Brushes.DarkSlateBlue;
                 box.SelectAll();
             }
         }
@@ -310,6 +310,8 @@ namespace NetImage.Views
         {
             if (sender is TextBox box)
             {
+                box.Background = Brushes.DarkSlateBlue;
+                box.Foreground = Brushes.White;
                 box.SelectAll();
             }
         }
@@ -317,6 +319,8 @@ namespace NetImage.Views
         private void HexBox_LostFocus(object sender, RoutedEventArgs e)
         {
             if (sender is not TextBox box) return;
+
+            box.Background = Brushes.Transparent;
 
             // Validate and finalize hex value
             string text = box.Text;
@@ -350,7 +354,27 @@ namespace NetImage.Views
 
         private void AsciiBox_LostFocus(object sender, RoutedEventArgs e)
         {
-            // Already handled in PreviewKeyUp
+            if (sender is not TextBox box) return;
+
+            box.Background = Brushes.Transparent;
+
+            int offset = GetOffset(box, _asciiBoxes);
+            if (offset < 0 || offset >= 512) return;
+
+            // Always revert the text box to whatever _bootSector currently holds.
+            // This prevents navigation from converting non-printable placeholder dots ('.') into 0x2E.
+            byte originalByte = _bootSector[offset];
+            char originalChar = (originalByte >= 32 && originalByte <= 126) ? (char)originalByte : '.';
+            box.Text = originalChar.ToString();
+            
+            if (originalByte < 32 || originalByte > 126)
+            {
+                box.Foreground = Brushes.Gray;
+            }
+            else
+            {
+                box.Foreground = Brushes.White;
+            }
         }
 
         private void MoveFocus(TextBox currentBox, int direction, TextBox[] boxes)
