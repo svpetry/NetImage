@@ -1263,14 +1263,14 @@ namespace NetImage.Tests.Workers
             worker.AddFile("lower.txt", new byte[] { 0x01 });
             await worker.SaveAsync(filePath); // Save changes to disk
 
-            // Assert - Re-open to verify filename is stored in uppercase
+            // Assert - Re-open to verify filename is preserved with original case via LFN
             var newWorker = new DiskImageWorker(filePath);
             await newWorker.OpenAsync();
-            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("LOWER.TXT"));
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("lower.txt"));
         }
 
         [Test]
-        public async Task AddFile_TruncatesLongFileNameTo83Format()
+        public async Task AddFile_WithLongFileName_StoresFullNameViaLfn()
         {
             // Arrange
             var filePath = Path.Combine(_tempDirectory!, "test.img");
@@ -1284,10 +1284,10 @@ namespace NetImage.Tests.Workers
             worker.AddFile("VERYLONGNAME.EXTENSION", new byte[] { 0x01 });
             await worker.SaveAsync(filePath); // Save changes to disk
 
-            // Assert - Re-open to verify filename is truncated to 8.3 format
+            // Assert - Re-open to verify filename is stored with full long name via LFN
             var newWorker = new DiskImageWorker(filePath);
             await newWorker.OpenAsync();
-            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("VERYLONG.EXT"));
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("VERYLONGNAME.EXTENSION"));
         }
 
         [Test]
@@ -1309,6 +1309,123 @@ namespace NetImage.Tests.Workers
             var newWorker = new DiskImageWorker(filePath);
             await newWorker.OpenAsync();
             Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("NOEXT"));
+        }
+
+        [Test]
+        public async Task AddFile_WithLongFileName_PreservesFullName()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "lfn-test.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+            var fileContent = Encoding.ASCII.GetBytes("Test content");
+
+            // Act - Add a file with a name longer than 8.3 (requires LFN)
+            worker.AddFile("MyLongFileName.Txt", fileContent);
+            await worker.SaveAsync(filePath);
+
+            // Assert - LFN names are readable in directory listing
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            var paths = newWorker.FilesAndFolders.Select(f => f.Path).ToList();
+            Assert.That(paths, Does.Contain("MyLongFileName.Txt"));
+        }
+
+        [Test]
+        public async Task AddFile_WithLowercaseName_PreservesCase()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "lower-test.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+            var fileContent = new byte[] { 0x01 };
+
+            // Act - Add a file with lowercase (requires LFN due to case)
+            worker.AddFile("myfile.txt", fileContent);
+            await worker.SaveAsync(filePath);
+
+            // Assert
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("myfile.txt"));
+        }
+
+        [Test]
+        public async Task AddFile_With83FormatName_WorksCorrectly()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "short-name.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+            var fileContent = new byte[] { 0x01 };
+
+            // Act - Add a file with a valid 8.3 name (no LFN needed)
+            worker.AddFile("SHORT.TXT", fileContent);
+            await worker.SaveAsync(filePath);
+
+            // Assert
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("SHORT.TXT"));
+            // Verify file is readable by 8.3 name
+            Assert.That(newWorker.GetFileContent("SHORT.TXT"), Is.EqualTo(fileContent));
+        }
+
+        [Test]
+        public async Task AddFile_WithDeletedEntriesInDirectory_FindsFreeSlot()
+        {
+            // Arrange - Create image with a file, delete it, then add another
+            var filePath = Path.Combine(_tempDirectory!, "deleted-slots.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+            worker.AddFile("FIRST.TXT", new byte[] { 0x01 });
+            worker.DeleteEntry("FIRST.TXT");
+            worker.AddFile("SECOND.TXT", new byte[] { 0x02 });
+
+            // Assert
+            var paths = worker.FilesAndFolders.Select(f => f.Path).ToList();
+            Assert.That(paths, Does.Not.Contain("FIRST.TXT"));
+            Assert.That(paths, Does.Contain("SECOND.TXT"));
+        }
+
+        [Test]
+        public async Task AddFile_WithLowercaseIn83Format_PreservesLowercaseViaLfn()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "lower83.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+            var fileContent = new byte[] { 0x01 };
+
+            // Act - Add a file with lowercase and short name (needs LFN due to case)
+            worker.AddFile("test.txt", fileContent);
+            await worker.SaveAsync(filePath);
+
+            // Assert - File should be listed with original case preserved
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("test.txt"));
+        }
+
+        [Test]
+        public async Task AddFile_WithLongFileNameInSubdirectory_PreservesName()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "subdir-lfn.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+            worker.CreateFolder(string.Empty, "SUBDIR");
+            var fileContent = Encoding.ASCII.GetBytes("Content");
+
+            // Act - Add a file with a long name inside the subdirectory
+            worker.AddFile("SUBDIR", "AVeryLongFileNameInSubdir.Txt", fileContent);
+            await worker.SaveAsync(filePath);
+
+            // Assert - LFN should be visible in directory listing
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(),
+                Does.Contain("SUBDIR\\AVeryLongFileNameInSubdir.Txt"));
         }
 
         [Test]
