@@ -22,16 +22,14 @@ jobs:
         with:
           dotnet-version: '10.0.x'
           
-      - name: Install WiX toolset using dotnet tool
-        run: dotnet tool install --global wix
+      - name: Install WiX toolset v4
+        run: dotnet tool install --global wix --version 4.0.5
 
       - name: Build Application (Single File)
         run: dotnet publish NetImage.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o publish_dir
 
       - name: Build MSI project
-        # In WiX v4, we can build via MSBuild using dotnet build.
-        # We pass target dir as the publish_dir we just created.
-        run: dotnet build NetImage.Setup/NetImage.Setup.wixproj -c Release /p:PublishDir="${{ github.workspace }}\publish_dir\\"
+        run: dotnet build NetImage.Setup/NetImage.Setup.wixproj -c Release /p:PublishDir="${{ github.workspace }}/publish_dir/"
 
       - name: Rename output
         run: |
