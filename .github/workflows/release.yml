@@ -33,7 +33,13 @@ jobs:
 
       - name: Rename output
         run: |
-          Move-Item "NetImage.Setup\bin\x64\Release\en-US\NetImage.msi" "NetImage-${{ github.ref_name }}.msi"
+          $msiPath = Get-ChildItem "NetImage.Setup\bin" -Filter "NetImage.msi" -Recurse |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $msiPath) {
+            throw "NetImage.msi was not found under NetImage.Setup\\bin."
+          }
+
+          Move-Item -LiteralPath $msiPath -Destination "NetImage-${{ github.ref_name }}.msi"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
