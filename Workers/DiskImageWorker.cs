@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using NetImage.Models;
 
 namespace NetImage.Workers
 {
@@ -36,6 +37,8 @@ namespace NetImage.Workers
         public string VolumeLabel { get; private set; } = string.Empty;
 
         public List<FileEntry> FilesAndFolders { get; private set; }
+        public IReadOnlyList<MbrPartition> Partitions => _partitions;
+        private readonly List<MbrPartition> _partitions = new();
 
         public bool IsLoaded
         {
@@ -72,6 +75,7 @@ namespace NetImage.Workers
             VolumeLabel = string.Empty;
             _fatType = null;
             _partitionStartSector = 0;
+            _partitions.Clear();
 
             if (_imageData == null || _imageData.Length < 512)
             {
@@ -197,6 +201,8 @@ namespace NetImage.Workers
 
             System.Diagnostics.Debug.WriteLine("Not a FAT BPB, checking partition table...");
 
+            uint firstFatPartitionStart = 0;
+
             // Check partition table at offset 446
             // Look for any partition with a FAT type
             for (int i = 0; i < 4; i++)
@@ -211,19 +217,26 @@ namespace NetImage.Workers
                 var entryBytes = string.Join(" ", sector.Slice(offset, 16).ToArray().Select(b => b.ToString("X2")));
                 System.Diagnostics.Debug.WriteLine($"Partition {i}: boot={bootIndicator:X2}, type={partitionType:X2}, start={startSector}, count={sectorCount}, raw=[{entryBytes}]");
 
+                if (partitionType != 0x00)
+                {
+                    _partitions.Add(new MbrPartition(i, bootIndicator == 0x80, partitionType, startSector, sectorCount));
+                }
+
                 // FAT partition types: 0x01, 0x04, 0x06 (FAT12/16), 0x0B, 0x0C (FAT32), 0x0E, 0x0F (large FAT12/16), 0x14, 0x16
-                if (partitionType == 0x01 || partitionType == 0x04 || partitionType == 0x06 ||
+                if (firstFatPartitionStart == 0 && (partitionType == 0x01 || partitionType == 0x04 || partitionType == 0x06 ||
                     partitionType == 0x0B || partitionType == 0x0C || partitionType == 0x0E ||
-                    partitionType == 0x0F || partitionType == 0x14 || partitionType == 0x16)
+                    partitionType == 0x0F || partitionType == 0x14 || partitionType == 0x16))
                 {
                     System.Diagnostics.Debug.WriteLine($"Found FAT partition type {partitionType:X2} at sector {startSector}");
-                    // Found a FAT partition, return its start sector
-                    return startSector;
+                    // Found a FAT partition, remember its start sector
+                    firstFatPartitionStart = startSector;
                 }
             }
 
-            System.Diagnostics.Debug.WriteLine("No FAT partition found");
-            return 0; // No FAT partition found
+            if (firstFatPartitionStart == 0)
+                System.Diagnostics.Debug.WriteLine("No FAT partition found");
+                
+            return firstFatPartitionStart;
         }
 
         private void ExtractVolumeLabel(uint startSector, int numSectors, Bpb bpb)

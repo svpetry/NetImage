@@ -63,6 +63,7 @@ namespace NetImage.ViewModels
             EditCommand = new ActionCommand(ExecuteEdit) { Enabled = false };
             RenameCommand = new ActionCommand(ExecuteRename) { Enabled = false };
             BootSectorCommand = new ActionCommand(ExecuteBootSector) { Enabled = false };
+            PartitionsCommand = new ActionCommand(ExecutePartitions) { Enabled = false };
             ImageMapCommand = new ActionCommand(ExecuteImageMap) { Enabled = false };
             SaveCommand = new ActionCommand(ExecuteSave) { Enabled = false };
             SaveAsCommand = new ActionCommand(ExecuteSaveAs) { Enabled = false };
@@ -83,6 +84,7 @@ namespace NetImage.ViewModels
         public ActionCommand EditCommand { get; }
         public ActionCommand RenameCommand { get; }
         public ActionCommand BootSectorCommand { get; }
+        public ActionCommand PartitionsCommand { get; }
         public ActionCommand ImageMapCommand { get; }
         public ActionCommand SaveCommand { get; }
         public ActionCommand SaveAsCommand { get; }
@@ -1106,6 +1108,15 @@ namespace NetImage.ViewModels
             }
         }
 
+        private void ExecutePartitions(object? parameter)
+        {
+            if (_imageWorker == null || _imageWorker.Partitions.Count == 0 || IsBusy)
+                return;
+
+            var dialog = new PartitionsDialog(_imageWorker.Partitions);
+            dialog.ShowDialog();
+        }
+
         private async void ExecuteSaveAs(object? parameter)
         {
             if (_imageWorker == null || IsBusy)
@@ -1251,6 +1262,7 @@ namespace NetImage.ViewModels
                                     _selectedItems.Count == 1 &&
                                     !IsBusy;
             BootSectorCommand.Enabled = hasLoadedImage && !IsBusy;
+            PartitionsCommand.Enabled = hasLoadedImage && _imageWorker!.Partitions.Count > 0 && !IsBusy;
             ImageMapCommand.Enabled = hasLoadedImage && !IsBusy;
             SaveCommand.Enabled = hasLoadedImage && _canSaveCurrentImage && !IsBusy;
             SaveAsCommand.Enabled = hasLoadedImage && !IsBusy;

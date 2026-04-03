@@ -111,6 +111,12 @@
                         <TextBlock Text="Bootsector" HorizontalAlignment="Center" Margin="0,2,0,0" FontSize="11"/>
                     </StackPanel>
                 </Button>
+                <Button Command="{Binding PartitionsCommand}" Background="Transparent" BorderThickness="0" Margin="2,0">
+                    <StackPanel Orientation="Vertical" Margin="4">
+                        <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE8FD;" FontSize="20" HorizontalAlignment="Center"/>
+                        <TextBlock Text="Partitions" HorizontalAlignment="Center" Margin="0,2,0,0" FontSize="11"/>
+                    </StackPanel>
+                </Button>
                 <Button Command="{Binding ImageMapCommand}" Background="Transparent" BorderThickness="0" Margin="2,0">
                     <StackPanel Orientation="Vertical" Margin="4">
                         <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE9F9;" FontSize="20" HorizontalAlignment="Center"/>
