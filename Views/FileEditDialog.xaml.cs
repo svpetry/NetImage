@@ -104,6 +104,14 @@ namespace NetImage.Views
             OpenFindDialog();
         }
 
+        private void EditTextBox_SelectionChanged(object sender, RoutedEventArgs e)
+        {
+            int lineIndex = EditTextBox.GetLineIndexFromCharacterIndex(EditTextBox.SelectionStart);
+            int column = EditTextBox.SelectionStart - EditTextBox.GetCharacterIndexFromLineIndex(lineIndex);
+            RowTextBlock.Text = (lineIndex + 1).ToString();
+            ColumnTextBlock.Text = (column + 1).ToString();
+        }
+
         private void OpenFindDialog()
         {
             var dialog = new FindDialog(_lastSearchText, _lastMatchCase)

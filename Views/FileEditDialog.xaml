@@ -41,13 +41,30 @@
                  Foreground="White"
                  SelectionBrush="White"
                  SelectionTextBrush="DarkSlateBlue"
-                 Margin="0,0,0,10"/>
+                 Margin="0,0,0,10"
+                 SelectionChanged="EditTextBox_SelectionChanged"/>
 
         <!-- Buttons -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button Content="Save" Width="80" Click="SaveButton_Click" IsDefault="True" Margin="0,0,10,0"/>
-            <Button Content="Cancel" Width="80" Click="CancelButton_Click" IsCancel="True"/>
-        </StackPanel>
+        <Grid Grid.Row="2" VerticalAlignment="Center">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StatusBar Background="Transparent" VerticalAlignment="Center">
+                <StatusBarItem>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Ln " Foreground="Gray"/>
+                        <TextBlock Name="RowTextBlock" Text="1"/>
+                        <TextBlock Text="  Col " Foreground="Gray" Margin="10,0,0,0"/>
+                        <TextBlock Name="ColumnTextBlock" Text="1"/>
+                    </StackPanel>
+                </StatusBarItem>
+            </StatusBar>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0">
+                <Button Content="Save" Width="80" Click="SaveButton_Click" IsDefault="True" Margin="0,0,10,0"/>
+                <Button Content="Cancel" Width="80" Click="CancelButton_Click" IsCancel="True"/>
+            </StackPanel>
+        </Grid>
         </Grid>
     </DockPanel>
 </Window>
