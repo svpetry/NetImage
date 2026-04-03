@@ -18,6 +18,7 @@ namespace NetImage.ViewModels
     public class MainViewModel : INotifyPropertyChanged
     {
         private const string ApplicationName = "NetImage";
+        private const string RepositoryUrl = "https://github.com/svpetry/NetImage";
         private string _statusText = "Ready";
         private string _diskSpaceText = string.Empty;
         private string _filesystemTypeText = string.Empty;
@@ -36,6 +37,7 @@ namespace NetImage.ViewModels
         public event EventHandler<string>? AddError;
 
         public event EventHandler<CreateFolderRequestEventArgs>? CreateFolderRequested;
+        public event EventHandler<AboutRequestEventArgs>? AboutRequested;
         public event EventHandler<string>? CreateFolderError;
         public event EventHandler<string>? DeleteError;
 
@@ -52,6 +54,7 @@ namespace NetImage.ViewModels
 
         public MainViewModel()
         {
+            AboutCommand = new ActionCommand(ExecuteAbout);
             NewCommand = new ActionCommand(ExecuteNew);
             OpenCommand = new ActionCommand(ExecuteOpen);
             CloseCommand = new ActionCommand(ExecuteClose) { Enabled = false };
@@ -73,6 +76,7 @@ namespace NetImage.ViewModels
             System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         }
 
+        public ActionCommand AboutCommand { get; }
         public ActionCommand NewCommand { get; }
         public ActionCommand OpenCommand { get; }
         public ActionCommand CloseCommand { get; }
@@ -89,7 +93,8 @@ namespace NetImage.ViewModels
         public ActionCommand ImageMapCommand { get; }
         public ActionCommand SaveCommand { get; }
         public ActionCommand SaveAsCommand { get; }
-        public string WindowTitle => $"{ApplicationName} {GetApplicationVersion()}";
+        public string ApplicationVersion => GetApplicationVersion();
+        public string WindowTitle => $"{ApplicationName} {ApplicationVersion}";
 
         public string StatusText
         {
@@ -315,6 +320,11 @@ namespace NetImage.ViewModels
             StatusText = dialog.IsHardDisk
                 ? $"New {sizeMB:F2} MB hard disk image created ({dialog.Cylinders}x{dialog.Heads}x{dialog.SectorsPerTrack})"
                 : $"New {dialog.SelectedSize / 1024} KB floppy disk image created";
+        }
+
+        private void ExecuteAbout(object? parameter)
+        {
+            AboutRequested?.Invoke(this, new AboutRequestEventArgs(ApplicationName, ApplicationVersion, RepositoryUrl));
         }
 
         private async void ExecuteOpen(object? parameter)

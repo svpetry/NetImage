@@ -402,6 +402,7 @@ namespace NetImage.Views
             if (DataContext is MainViewModel vm)
             {
                 vm.CreateFolderRequested += OnCreateFolderRequested;
+                vm.AboutRequested += OnAboutRequested;
                 vm.CreateFolderError += OnCreateFolderError;
                 vm.AddError += OnAddError;
                 vm.DeleteError += OnDeleteError;
@@ -427,6 +428,7 @@ namespace NetImage.Views
                 if (e.OldValue is MainViewModel oldVm)
                 {
                     oldVm.CreateFolderRequested -= OnCreateFolderRequested;
+                    oldVm.AboutRequested -= OnAboutRequested;
                     oldVm.CreateFolderError -= OnCreateFolderError;
                     oldVm.AddError -= OnAddError;
                     oldVm.DeleteError -= OnDeleteError;
@@ -441,6 +443,7 @@ namespace NetImage.Views
                 if (e.NewValue is MainViewModel newVm)
                 {
                     newVm.CreateFolderRequested += OnCreateFolderRequested;
+                    newVm.AboutRequested += OnAboutRequested;
                     newVm.CreateFolderError += OnCreateFolderError;
                     newVm.AddError += OnAddError;
                     newVm.DeleteError += OnDeleteError;
@@ -559,6 +562,16 @@ namespace NetImage.Views
             {
                 e.FolderName = dialog.FolderName;
             }
+        }
+
+        private void OnAboutRequested(object? sender, AboutRequestEventArgs e)
+        {
+            var dialog = new AboutDialog(e.ApplicationName, e.Version, e.RepositoryUrl)
+            {
+                Owner = this
+            };
+
+            dialog.ShowDialog();
         }
 
         private void OnCreateFolderError(object? sender, string message)
