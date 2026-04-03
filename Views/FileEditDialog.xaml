@@ -39,6 +39,8 @@
                  FontSize="12"
                  Background="#0000AA"
                  Foreground="White"
+                 SelectionBrush="White"
+                 SelectionTextBrush="DarkSlateBlue"
                  Margin="0,0,0,10"/>
 
         <!-- Buttons -->
