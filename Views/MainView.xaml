@@ -6,7 +6,9 @@
         xmlns:local="clr-namespace:NetImage.Views"
         xmlns:vm="clr-namespace:NetImage.ViewModels"
         Title="{Binding WindowTitle}" Height="450" Width="840" MinWidth="600" MinHeight="300"
-        Icon="/diskette.ico">
+        Icon="/diskette.ico"
+        AllowDrop="True"
+        PreviewDragOver="OnWindowPreviewDragOver">
     <Window.DataContext>
         <vm:MainViewModel/>
     </Window.DataContext>
@@ -135,7 +137,7 @@
             </Grid.ColumnDefinitions>
 
             <!-- Left pane: Folders Tree -->
-            <TreeView Grid.Column="0" Name="MainTreeView" ItemsSource="{Binding TreeItems}" BorderThickness="0" Padding="0,4">
+            <TreeView Grid.Column="0" Name="MainTreeView" ItemsSource="{Binding TreeItems}" BorderThickness="0" Padding="0,4" AllowDrop="True" DragOver="OnTreeViewDragOver" Drop="OnTreeViewDrop">
                 <TreeView.Resources>
                     <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="Transparent"/>
                     <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="Black"/>
@@ -161,6 +163,10 @@
                                 <Setter TargetName="SelectionBorder" Property="Background" Value="#CCE8FF"/>
                                 <Setter TargetName="SelectionBorder" Property="BorderBrush" Value="Black"/>
                             </DataTrigger>
+                            <DataTrigger Binding="{Binding IsDropTarget}" Value="True">
+                                <Setter TargetName="SelectionBorder" Property="Background" Value="#DDEEFF"/>
+                                <Setter TargetName="SelectionBorder" Property="BorderBrush" Value="#2B78D6"/>
+                            </DataTrigger>
                         </HierarchicalDataTemplate.Triggers>
                     </HierarchicalDataTemplate>
                 </TreeView.ItemTemplate>
@@ -169,12 +175,22 @@
             <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Center" VerticalAlignment="Stretch" Background="Transparent"/>
 
             <!-- Right pane: Files/Folders List -->
-            <ListView Grid.Column="2" Name="MainListView" ItemsSource="{Binding CurrentFolder.Items}" BorderThickness="1,0,0,0" BorderBrush="#EEEEEE" SelectionChanged="MainListView_SelectionChanged">
+            <ListView Grid.Column="2" Name="MainListView" ItemsSource="{Binding CurrentFolder.Items}" BorderThickness="1,0,0,0" BorderBrush="#EEEEEE" SelectionChanged="MainListView_SelectionChanged"
+                      AllowDrop="True" DragOver="OnListViewDragOver" Drop="OnListViewDrop" GiveFeedback="OnListViewGiveFeedback"
+                      PreviewMouseMove="OnListViewMouseMove" PreviewMouseLeftButtonDown="OnListViewMouseLeftButtonDown">
                 <ListView.ItemContainerStyle>
                     <Style TargetType="ListViewItem">
                         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                         <Setter Property="Padding" Value="4,2"/>
+                        <Setter Property="BorderThickness" Value="1"/>
+                        <Setter Property="BorderBrush" Value="Transparent"/>
                         <EventSetter Event="MouseDoubleClick" Handler="MainListViewItem_MouseDoubleClick"/>
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsDropTarget}" Value="True">
+                                <Setter Property="Background" Value="#DDEEFF"/>
+                                <Setter Property="BorderBrush" Value="#2B78D6"/>
+                            </DataTrigger>
+                        </Style.Triggers>
                     </Style>
                 </ListView.ItemContainerStyle>
                 <ListView.View>
@@ -246,5 +262,15 @@
                 </StackPanel>
             </StatusBarItem>
         </StatusBar>
+
+        <!-- Drag visual popup -->
+        <Popup x:Name="DragPopup" AllowsTransparency="True" IsHitTestVisible="False" Placement="RelativePoint" PlacementTarget="{Binding ElementName=MainListView}">
+            <Border Background="#EE333333" CornerRadius="4" Padding="8,4">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE7C3;" FontSize="14" Foreground="White" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <TextBlock x:Name="DragPopupText" Text="file.txt" Foreground="White" FontSize="12" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Border>
+        </Popup>
     </Grid>
 </Window>

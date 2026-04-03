@@ -2,6 +2,8 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -49,6 +51,271 @@ namespace NetImage.Views
             _searchTimer.Interval = TimeSpan.FromMilliseconds(1000);
             _searchTimer.Tick += (_, _) => _searchBuffer = string.Empty;
         }
+
+        #region Drag and Drop
+
+        private const double DragPopupCursorOffsetX = 16;
+        private const double DragPopupCursorOffsetY = 20;
+
+        private Point _dragStartPoint;
+        private bool _isDragging;
+        private List<TreeItem>? _currentDragItems;
+        private TreeItem? _currentDropTarget;
+
+        private void OnListViewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (e.LeftButton != MouseButtonState.Pressed || _isDragging)
+                return;
+
+            var diff = e.GetPosition(this) - _dragStartPoint;
+            if (System.Math.Abs(diff.X) > SystemParameters.MinimumHorizontalDragDistance ||
+                System.Math.Abs(diff.Y) > SystemParameters.MinimumVerticalDragDistance)
+            {
+                _isDragging = true;
+
+                if (DataContext is MainViewModel vm && MainListView.SelectedItems.Count > 0)
+                {
+                    var itemsToMove = MainListView.SelectedItems.Cast<TreeItem>().Where(i => !i.IsFolder).ToList();
+                    if (itemsToMove.Count > 0)
+                    {
+                        try
+                        {
+                            _currentDragItems = itemsToMove;
+                            DragPopupText.Text = itemsToMove.Count == 1
+                                ? itemsToMove[0].Name
+                                : $"{itemsToMove.Count} files";
+                            UpdateDragPopupPosition();
+                            DragPopup.IsOpen = true;
+                            DragDrop.DoDragDrop(MainListView, itemsToMove, DragDropEffects.Move);
+                        }
+                        finally
+                        {
+                            DragPopup.IsOpen = false;
+                            SetDropTarget(null);
+                            _currentDragItems = null;
+                        }
+                    }
+                }
+
+                _isDragging = false;
+            }
+        }
+
+        private void OnListViewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            _dragStartPoint = e.GetPosition(this);
+        }
+
+        private void OnListViewGiveFeedback(object sender, GiveFeedbackEventArgs e)
+        {
+            if (_currentDragItems == null)
+            {
+                e.UseDefaultCursors = true;
+                e.Handled = true;
+                return;
+            }
+
+            UpdateDragPopupPosition();
+
+            if (e.Effects == DragDropEffects.Move)
+            {
+                e.UseDefaultCursors = false;
+                Mouse.SetCursor(Cursors.Arrow);
+            }
+            else
+            {
+                e.UseDefaultCursors = true;
+            }
+            e.Handled = true;
+        }
+
+        private void OnWindowPreviewDragOver(object sender, DragEventArgs e)
+        {
+            if (_currentDragItems == null)
+            {
+                SetDropTarget(null);
+                return;
+            }
+
+            UpdateDragPopupPosition();
+            SetDropTarget(GetHoveredFolder(e.OriginalSource as DependencyObject));
+        }
+
+        private void OnListViewDragOver(object sender, DragEventArgs e)
+        {
+            if (DataContext is not MainViewModel vm)
+            {
+                e.Effects = DragDropEffects.None;
+                e.Handled = true;
+                return;
+            }
+
+            // Determine target folder
+            var targetFolder = GetDropTargetFolder(e, vm);
+            if (targetFolder == null)
+            {
+                e.Effects = DragDropEffects.None;
+            }
+            else
+            {
+                e.Effects = DragDropEffects.Move;
+            }
+            e.Handled = true;
+        }
+
+        private void OnListViewDrop(object sender, DragEventArgs e)
+        {
+            DragPopup.IsOpen = false;
+            if (DataContext is not MainViewModel vm)
+                return;
+
+            var targetFolder = GetDropTargetFolder(e, vm);
+            if (targetFolder == null)
+                return;
+
+            var itemsToMove = e.Data.GetData(typeof(List<TreeItem>)) as List<TreeItem>;
+            if (itemsToMove == null || itemsToMove.Count == 0)
+                return;
+
+            _ = vm.MoveItemsAsync(itemsToMove, targetFolder.Path);
+            e.Handled = true;
+        }
+
+        private void OnTreeViewDragOver(object sender, DragEventArgs e)
+        {
+            if (DataContext is not MainViewModel vm)
+            {
+                e.Effects = DragDropEffects.None;
+                e.Handled = true;
+                return;
+            }
+
+            // Get the TreeViewItem under the mouse
+            var treeViewItem = FindAncestor<TreeViewItem>((DependencyObject)e.OriginalSource);
+            if (treeViewItem?.DataContext is not TreeItem targetFolder || !targetFolder.IsFolder)
+            {
+                e.Effects = DragDropEffects.None;
+            }
+            else
+            {
+                e.Effects = DragDropEffects.Move;
+            }
+            e.Handled = true;
+        }
+
+        private void OnTreeViewDrop(object sender, DragEventArgs e)
+        {
+            DragPopup.IsOpen = false;
+            if (DataContext is not MainViewModel vm)
+                return;
+
+            // Get the TreeViewItem under the mouse
+            var treeViewItem = FindAncestor<TreeViewItem>((DependencyObject)e.OriginalSource);
+            if (treeViewItem?.DataContext is not TreeItem targetFolder || !targetFolder.IsFolder)
+                return;
+
+            var itemsToMove = e.Data.GetData(typeof(List<TreeItem>)) as List<TreeItem>;
+            if (itemsToMove == null || itemsToMove.Count == 0)
+                return;
+
+            _ = vm.MoveItemsAsync(itemsToMove, targetFolder.Path);
+            e.Handled = true;
+        }
+
+        private TreeItem? GetDropTargetFolder(DragEventArgs e, MainViewModel vm)
+        {
+            // Check if dropped on a ListViewItem that is a folder
+            var listViewItem = FindAncestor<ListViewItem>((DependencyObject)e.OriginalSource);
+            if (listViewItem?.DataContext is TreeItem item && item.IsFolder)
+            {
+                return item;
+            }
+
+            // Otherwise, use the current folder
+            return vm.CurrentFolder;
+        }
+
+        private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+        {
+            while (current != null)
+            {
+                if (current is T ancestor)
+                    return ancestor;
+                current = System.Windows.Media.VisualTreeHelper.GetParent(current);
+            }
+            return null;
+        }
+
+        private TreeItem? GetHoveredFolder(DependencyObject? originalSource)
+        {
+            if (FindAncestor<ListViewItem>(originalSource) is { DataContext: TreeItem { IsFolder: true } listItem })
+            {
+                return listItem;
+            }
+
+            if (FindAncestor<TreeViewItem>(originalSource) is { DataContext: TreeItem { IsFolder: true } treeItem })
+            {
+                return treeItem;
+            }
+
+            return null;
+        }
+
+        private void SetDropTarget(TreeItem? target)
+        {
+            if (ReferenceEquals(_currentDropTarget, target))
+            {
+                return;
+            }
+
+            if (_currentDropTarget != null)
+            {
+                _currentDropTarget.IsDropTarget = false;
+            }
+
+            _currentDropTarget = target;
+
+            if (_currentDropTarget != null)
+            {
+                _currentDropTarget.IsDropTarget = true;
+            }
+        }
+
+        private void UpdateDragPopupPosition()
+        {
+            if (!TryGetCursorPosition(out var cursorPosition))
+            {
+                return;
+            }
+
+            var relativePosition = MainListView.PointFromScreen(cursorPosition);
+            DragPopup.HorizontalOffset = relativePosition.X + DragPopupCursorOffsetX;
+            DragPopup.VerticalOffset = relativePosition.Y + DragPopupCursorOffsetY;
+        }
+
+        private static bool TryGetCursorPosition(out Point position)
+        {
+            if (!GetCursorPos(out var nativePoint))
+            {
+                position = default;
+                return false;
+            }
+
+            position = new Point(nativePoint.X, nativePoint.Y);
+            return true;
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetCursorPos(out NativePoint lpPoint);
+
+        private struct NativePoint
+        {
+            public int X;
+            public int Y;
+        }
+
+        #endregion
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
@@ -143,6 +410,7 @@ namespace NetImage.Views
                 vm.CloseImageRequested += OnCloseImageRequested;
                 vm.RenameRequested += OnRenameRequested;
                 vm.RenameError += OnRenameError;
+                vm.MoveError += OnMoveError;
                 vm.FormatRequested += OnFormatRequested;
                 vm.TreeViewBuilt += OnTreeViewBuilt;
 
@@ -166,6 +434,9 @@ namespace NetImage.Views
                     oldVm.SaveError -= OnSaveError;
                     oldVm.FormatRequested -= OnFormatRequested;
                     oldVm.CloseImageRequested -= OnCloseImageRequested;
+                    oldVm.RenameRequested -= OnRenameRequested;
+                    oldVm.RenameError -= OnRenameError;
+                    oldVm.MoveError -= OnMoveError;
                 }
                 if (e.NewValue is MainViewModel newVm)
                 {
@@ -178,6 +449,7 @@ namespace NetImage.Views
                     newVm.CloseImageRequested += OnCloseImageRequested;
                     newVm.RenameRequested += OnRenameRequested;
                     newVm.RenameError += OnRenameError;
+                    newVm.MoveError += OnMoveError;
                     newVm.FormatRequested += OnFormatRequested;
                     newVm.TreeViewBuilt += OnTreeViewBuilt;
                 }
@@ -328,6 +600,11 @@ namespace NetImage.Views
         }
 
         private void OnRenameError(object? sender, string message)
+        {
+            MessageBox.Show(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+
+        private void OnMoveError(object? sender, string message)
         {
             MessageBox.Show(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }

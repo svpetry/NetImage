@@ -16,6 +16,7 @@ namespace NetImage.Models
     public class TreeItem : INotifyPropertyChanged
     {
         private bool _isExpanded;
+        private bool _isDropTarget;
         private bool _isSelected;
 
         public TreeItem(string name, string path, long? size = null, DateTime? modified = null)
@@ -75,6 +76,21 @@ namespace NetImage.Models
             set
             {
                 _isSelected = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool IsDropTarget
+        {
+            get => _isDropTarget;
+            set
+            {
+                if (_isDropTarget == value)
+                {
+                    return;
+                }
+
+                _isDropTarget = value;
                 OnPropertyChanged();
             }
         }

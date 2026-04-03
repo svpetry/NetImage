@@ -1835,6 +1835,41 @@ namespace NetImage.Workers
             ParseFatFilesystem();
         }
 
+        /// <summary>
+        /// Moves a file to a different directory within the disk image.
+        /// </summary>
+        /// <param name="sourcePath">Full path to the source file inside the image.</param>
+        /// <param name="targetDirectory">Target directory path (empty string for root).</param>
+        public void MoveEntry(string sourcePath, string targetDirectory)
+        {
+            if (_imageData == null || !_isLoaded)
+                throw new InvalidOperationException("Image must be opened before moving files.");
+
+            var lastSlash = sourcePath.LastIndexOf('\\');
+            var sourceDirectory = lastSlash >= 0 ? sourcePath.Substring(0, lastSlash) : string.Empty;
+            var fileName = lastSlash >= 0 ? sourcePath.Substring(lastSlash + 1) : sourcePath;
+
+            // If moving within the same directory, just rename
+            if (sourceDirectory.Equals(targetDirectory, StringComparison.OrdinalIgnoreCase))
+            {
+                RenameEntry(sourcePath, fileName);
+                return;
+            }
+
+            // Read file content
+            var content = GetFileContent(sourcePath);
+            if (content == null)
+                throw new FileNotFoundException($"File '{sourcePath}' not found in the disk image.");
+
+            // Delete original entry
+            DeleteEntry(sourcePath);
+
+            // Add file to new location
+            AddFileInternal(targetDirectory, fileName, content);
+
+            ParseFatFilesystem();
+        }
+
         private void DeleteEntryInternal(DirectoryLocation directory, string name, Bpb bpb)
         {
             var imageData = _imageData!;

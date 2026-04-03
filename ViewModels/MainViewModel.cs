@@ -47,6 +47,7 @@ namespace NetImage.ViewModels
 
         public event EventHandler<RenameRequestEventArgs>? RenameRequested;
         public event EventHandler<string>? RenameError;
+        public event EventHandler<string>? MoveError;
         public event EventHandler? TreeViewBuilt;
 
         public MainViewModel()
@@ -712,6 +713,53 @@ namespace NetImage.ViewModels
             StatusText = itemsToDelete.Count > 1
                 ? $"Deleted {itemsToDelete.Count} items"
                 : $"Deleted '{itemsToDelete[0].Name}'";
+        }
+
+        public async Task MoveItemsAsync(IEnumerable<TreeItem> itemsToMove, string targetDirectory)
+        {
+            if (_imageWorker == null || IsBusy)
+                return;
+
+            var worker = _imageWorker;
+            var itemList = itemsToMove.ToList();
+
+            // Filter out folders (cannot move folders for now)
+            var filesToMove = itemList.Where(i => !i.IsFolder).ToList();
+
+            // Filter out files already in the target directory
+            filesToMove = filesToMove
+                .Where(f => !GetParentFolderPath(f.Path).Equals(targetDirectory, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (filesToMove.Count == 0)
+                return;
+
+            try
+            {
+                await RunBusyOperationAsync(
+                    "Moving...",
+                    () => Task.Run(() =>
+                    {
+                        foreach (var item in filesToMove)
+                        {
+                            worker.MoveEntry(item.Path, targetDirectory);
+                        }
+                    }),
+                    isIndeterminate: true,
+                    progressText: filesToMove.Count > 1 ? $"{filesToMove.Count} files" : filesToMove[0].Name);
+            }
+            catch (Exception ex)
+            {
+                MoveError?.Invoke(this, ex.Message);
+                return;
+            }
+
+            BuildTreeView();
+            RefreshDiskSpaceText();
+            HasUnsavedChanges = true;
+            StatusText = filesToMove.Count > 1
+                ? $"Moved {filesToMove.Count} files"
+                : $"Moved '{filesToMove[0].Name}'";
         }
 
         private async void ExecuteExtract(object? parameter)
