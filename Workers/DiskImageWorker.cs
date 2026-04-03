@@ -257,6 +257,10 @@ namespace NetImage.Workers
                 if (firstByte == 0x00 || firstByte == 0xE5)
                     continue;
 
+                // Skip LFN entries - they are not volume labels despite having bit 3 set
+                if (IsLfNEntry(entry))
+                    continue;
+
                 const byte ATTR_VOLUME_LABEL = 0x08;
                 if ((entry[11] & ATTR_VOLUME_LABEL) != 0)
                 {
