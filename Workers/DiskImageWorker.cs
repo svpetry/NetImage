@@ -2764,6 +2764,65 @@ namespace NetImage.Workers
             // Remaining fields are zeroed (reserved, time, date, clusters, size)
         }
 
+        /// <summary>
+        /// Formats the currently loaded disk image by clearing the FAT and root directory.
+        /// </summary>
+        public void FormatImage()
+        {
+            if (_imageData == null || !_isLoaded)
+                throw new InvalidOperationException("Image must be opened before formatting.");
+
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bootSectorSpan = new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512);
+            var bpb = ParseBpb(bootSectorSpan);
+
+            // 1. Clear FAT and Root Directory
+            var fatStartOffset = (int)((_partitionStartSector + bpb.ReservedSectors) * bpb.BytesPerSector);
+            var fatSizeBytes = (int)(bpb.NumFats * bpb.SectorsPerFat * bpb.BytesPerSector);
+
+            var rootDirStartOffset = fatStartOffset + fatSizeBytes;
+            var rootDirSectors = ((bpb.RootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector;
+            var rootDirSizeBytes = (int)(rootDirSectors * bpb.BytesPerSector);
+
+            if (fatStartOffset + fatSizeBytes + rootDirSizeBytes > _imageData.Length)
+                throw new InvalidOperationException("Calculated FAT/Root Directory size exceeds image capacity.");
+
+            Array.Clear(_imageData, fatStartOffset, fatSizeBytes + rootDirSizeBytes);
+
+            // 2. Re-initialize FAT Reserved Clusters
+            for (byte fatNum = 0; fatNum < bpb.NumFats; fatNum++)
+            {
+                var currentFatOffset = fatStartOffset + (int)(fatNum * bpb.SectorsPerFat * bpb.BytesPerSector);
+
+                if (IsFat12(bpb))
+                {
+                    _imageData[currentFatOffset] = bpb.MediaDescriptor;
+                    _imageData[currentFatOffset + 1] = 0xFF;
+                    _imageData[currentFatOffset + 2] = 0xFF;
+                }
+                else
+                {
+                    _imageData[currentFatOffset] = bpb.MediaDescriptor;
+                    _imageData[currentFatOffset + 1] = 0xFF;
+                    _imageData[currentFatOffset + 2] = 0xFF;
+                    _imageData[currentFatOffset + 3] = 0x0F;
+
+                    // FAT16 cluster 1 is end of chain
+                    _imageData[currentFatOffset + 4] = 0xFF;
+                    _imageData[currentFatOffset + 5] = 0x0F;
+                }
+            }
+
+            // 3. Re-create Volume Label entry if it existed
+            if (!string.IsNullOrEmpty(VolumeLabel))
+            {
+                CreateVolumeLabelEntry(_imageData.AsSpan(rootDirStartOffset), VolumeLabel);
+            }
+
+            // 4. Reload
+            ParseFatFilesystem();
+        }
+
         private sealed class OperationProgressTracker(string rootFolderPath, long totalBytes, IProgress<OperationProgress>? progress)
         {
             private readonly string _rootFolderPath = rootFolderPath;

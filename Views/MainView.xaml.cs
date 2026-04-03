@@ -54,6 +54,7 @@ namespace NetImage.Views
                 vm.CloseImageRequested += OnCloseImageRequested;
                 vm.RenameRequested += OnRenameRequested;
                 vm.RenameError += OnRenameError;
+                vm.FormatRequested += OnFormatRequested;
                 vm.TreeViewBuilt += OnTreeViewBuilt;
 
                 // Handle command-line file path (for file associations)
@@ -74,6 +75,7 @@ namespace NetImage.Views
                     oldVm.DeleteError -= OnDeleteError;
                     oldVm.ExtractError -= OnExtractError;
                     oldVm.SaveError -= OnSaveError;
+                    oldVm.FormatRequested -= OnFormatRequested;
                     oldVm.CloseImageRequested -= OnCloseImageRequested;
                 }
                 if (e.NewValue is MainViewModel newVm)
@@ -87,6 +89,7 @@ namespace NetImage.Views
                     newVm.CloseImageRequested += OnCloseImageRequested;
                     newVm.RenameRequested += OnRenameRequested;
                     newVm.RenameError += OnRenameError;
+                    newVm.FormatRequested += OnFormatRequested;
                     newVm.TreeViewBuilt += OnTreeViewBuilt;
                 }
             };
@@ -238,6 +241,17 @@ namespace NetImage.Views
         private void OnRenameError(object? sender, string message)
         {
             MessageBox.Show(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+
+        private void OnFormatRequested(object? sender, FormatRequestEventArgs e)
+        {
+            var result = MessageBox.Show(
+                "Formatting will erase all data on the disk image. Are you sure you want to continue?",
+                "Format Disk Image",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            e.ConfirmFormat = result == MessageBoxResult.Yes;
         }
 
         private void OnTreeViewBuilt(object? sender, EventArgs e)

@@ -40,6 +40,7 @@ namespace NetImage.ViewModels
         public event EventHandler<string>? DeleteError;
 
         public event EventHandler<string>? ExtractError;
+        public event EventHandler<FormatRequestEventArgs>? FormatRequested;
 
         public event EventHandler<string>? SaveError;
         public event EventHandler<CloseImageRequestEventArgs>? CloseImageRequested;
@@ -58,6 +59,7 @@ namespace NetImage.ViewModels
             CreateFolderCommand = new ActionCommand(ExecuteCreateFolder) { Enabled = false };
             DeleteCommand = new ActionCommand(ExecuteDelete) { Enabled = false };
             ExtractCommand = new ActionCommand(ExecuteExtract) { Enabled = false };
+            FormatCommand = new ActionCommand(ExecuteFormat) { Enabled = false };
             EditCommand = new ActionCommand(ExecuteEdit) { Enabled = false };
             RenameCommand = new ActionCommand(ExecuteRename) { Enabled = false };
             BootSectorCommand = new ActionCommand(ExecuteBootSector) { Enabled = false };
@@ -77,6 +79,7 @@ namespace NetImage.ViewModels
         public ActionCommand CreateFolderCommand { get; }
         public ActionCommand DeleteCommand { get; }
         public ActionCommand ExtractCommand { get; }
+        public ActionCommand FormatCommand { get; }
         public ActionCommand EditCommand { get; }
         public ActionCommand RenameCommand { get; }
         public ActionCommand BootSectorCommand { get; }
@@ -894,6 +897,37 @@ namespace NetImage.ViewModels
             }
         }
 
+        private async void ExecuteFormat(object? parameter)
+        {
+            if (_imageWorker == null || IsBusy)
+                return;
+
+            var args = new FormatRequestEventArgs();
+            FormatRequested?.Invoke(this, args);
+
+            if (!args.ConfirmFormat)
+                return;
+
+            var worker = _imageWorker;
+
+            try
+            {
+                await RunBusyOperationAsync(
+                    "Formatting image...",
+                    () => Task.Run(() => worker.FormatImage()),
+                    progressText: "Formatting");
+
+                BuildTreeView();
+                RefreshDiskSpaceText();
+                HasUnsavedChanges = true;
+                StatusText = "Disk image formatted successfully.";
+            }
+            catch (Exception ex)
+            {
+                StatusText = $"Could not format image: {ex.Message}";
+            }
+        }
+
         private async void ExecuteEdit(object? parameter)
         {
             if (_imageWorker == null || _selectedItem == null || IsBusy)
@@ -1205,6 +1239,7 @@ namespace NetImage.ViewModels
             CreateFolderCommand.Enabled = hasLoadedImage && !IsBusy;
             DeleteCommand.Enabled = hasLoadedImage && hasSelection && !IsBusy;
             ExtractCommand.Enabled = hasLoadedImage && hasSelection && !IsBusy;
+            FormatCommand.Enabled = hasLoadedImage && !IsBusy;
             EditCommand.Enabled = hasLoadedImage &&
                                   _selectedItem != null &&
                                   _selectedItems.Count == 1 &&
