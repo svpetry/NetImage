@@ -1,0 +1,27 @@
+<Window x:Class="NetImage.Views.FindDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Find" Height="150" Width="350"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        
+        <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,10">
+            <TextBlock Text="Find text:" VerticalAlignment="Center" Margin="0,0,10,0"/>
+            <TextBox Name="SearchTextBox" Width="240" VerticalAlignment="Center"/>
+        </StackPanel>
+        
+        <CheckBox Name="MatchCaseCheckBox" Content="Match case" Grid.Row="1" Margin="65,0,0,10"/>
+        
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Find Next" Width="80" Click="FindNext_Click" IsDefault="True" Margin="0,0,10,0"/>
+            <Button Content="Cancel" Width="80" Click="Cancel_Click" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>
