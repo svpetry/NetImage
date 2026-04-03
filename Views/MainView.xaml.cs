@@ -19,10 +19,13 @@ namespace NetImage.Views
     {
         private string? _currentSortProp;
         private ListSortDirection _currentSortDirection = ListSortDirection.Ascending;
+        private string _searchBuffer = string.Empty;
+        private System.Windows.Threading.DispatcherTimer? _searchTimer;
 
         public MainView()
         {
             InitializeComponent();
+            InitSearchTimer();
             MainTreeView.SelectedItemChanged += OnTreeViewSelectedItemChanged;
             EventManager.RegisterClassHandler(typeof(TreeViewItem), FrameworkElement.LoadedEvent, new RoutedEventHandler(OnTreeViewItemLoaded));
             EventManager.RegisterClassHandler(typeof(GridViewColumnHeader), MouseLeftButtonUpEvent, new MouseButtonEventHandler(GridViewHeader_MouseLeftButtonUp));
@@ -37,6 +40,92 @@ namespace NetImage.Views
             if (items != null)
             {
                 items.SortDescriptions.Add(new SortDescription("IsFolder", ListSortDirection.Descending));
+            }
+        }
+
+        private void InitSearchTimer()
+        {
+            _searchTimer = new System.Windows.Threading.DispatcherTimer();
+            _searchTimer.Interval = TimeSpan.FromMilliseconds(1000);
+            _searchTimer.Tick += (_, _) => _searchBuffer = string.Empty;
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+
+            // Ignore if focus is in an editable text box
+            if (e.OriginalSource is TextBox)
+                return;
+
+            var key = e.Key;
+            char? ch = null;
+
+            // Handle letter keys directly (A-Z, a-z)
+            if (key >= Key.A && key <= Key.Z)
+            {
+                ch = (char)('a' + (key - Key.A));
+            }
+            // Handle digit keys
+            else if (key >= Key.D0 && key <= Key.D9)
+            {
+                ch = (char)('0' + (key - Key.D0));
+            }
+            else if (key >= Key.NumPad0 && key <= Key.NumPad9)
+            {
+                ch = (char)('0' + (key - Key.NumPad0));
+            }
+            // Handle space, period, dash in filenames
+            else if (key == Key.Space)
+            {
+                ch = ' ';
+            }
+            else if (key == Key.OemPeriod)
+            {
+                ch = '.';
+            }
+            else if (key == Key.OemMinus)
+            {
+                ch = '-';
+            }
+            else if (key == Key.OemQuotes)
+            {
+                ch = '\'';
+            }
+
+            if (ch.HasValue)
+            {
+                _searchBuffer += ch.Value;
+                _searchTimer?.Stop();
+                _searchTimer?.Start();
+                SearchToItem(_searchBuffer);
+                e.Handled = true;
+            }
+        }
+
+        private void SearchToItem(string search)
+        {
+            if (MainListView.Items.Count == 0)
+                return;
+
+            var items = MainListView.Items;
+            var lowerSearch = search.ToLower();
+
+            // Check if current selection already matches
+            if (MainListView.SelectedItem is TreeItem selected && selected.Name.ToLower().StartsWith(lowerSearch))
+            {
+                return;
+            }
+
+            // Start search from top
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (items[i] is TreeItem item && item.Name.ToLower().StartsWith(lowerSearch))
+                {
+                    MainListView.SelectedIndex = i;
+                    MainListView.ScrollIntoView(item);
+                    return;
+                }
             }
         }
 
