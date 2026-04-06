@@ -45,12 +45,9 @@ That means:
 NetImage is already very capable for classic DOS-era image workflows, but a few limitations are worth knowing up front:
 
 - FAT32 is not supported yet
-- Long file names (LFN) are currently skipped
-- File and folder names are normalized to FAT 8.3 format
 - Cluster allocation uses a simple linear search
 - There is currently no undo/redo system
 - Text editing is intended for text-like files; known binary file types are not opened in the editor
-- Most file operations still run on the UI thread except opening and saving
 
 ## Download
 
