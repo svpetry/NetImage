@@ -13,6 +13,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <DataGrid Grid.Row="0" Margin="0,0,0,10"
@@ -22,6 +23,8 @@
                   SelectionMode="Single"
                   HeadersVisibility="Column"
                   GridLinesVisibility="All"
+                  HorizontalGridLinesBrush="LightGray"
+                  VerticalGridLinesBrush="LightGray"
                   Background="White"
                   AlternatingRowBackground="#FAFAFA">
             <DataGrid.Columns>
@@ -40,6 +43,8 @@
             </DataGrid.ItemContainerStyle>
         </DataGrid>
 
-        <Button Grid.Row="1" Content="Close" Width="75" Height="24" HorizontalAlignment="Right" IsCancel="True" Click="CloseButton_Click" />
+        <TextBlock Grid.Row="1" x:Name="SectorSizeText" Margin="0,0,0,10" />
+
+        <Button Grid.Row="2" Content="Close" Width="75" Height="24" HorizontalAlignment="Right" IsCancel="True" Click="CloseButton_Click" />
     </Grid>
 </Window>

@@ -9,8 +9,11 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Runtime.CompilerServices;
+using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 namespace NetImage.ViewModels
@@ -324,7 +327,7 @@ namespace NetImage.ViewModels
 
         private void ExecuteAbout(object? parameter)
         {
-            AboutRequested?.Invoke(this, new AboutRequestEventArgs(ApplicationName, ApplicationVersion, RepositoryUrl));
+            AboutRequested?.Invoke(this, new AboutRequestEventArgs(ApplicationName, ApplicationVersion, RepositoryUrl, ""));
         }
 
         private async void ExecuteOpen(object? parameter)
@@ -1171,7 +1174,7 @@ namespace NetImage.ViewModels
             if (_imageWorker == null || _imageWorker.Partitions.Count == 0 || IsBusy)
                 return;
 
-            var dialog = new PartitionsDialog(_imageWorker.Partitions);
+            var dialog = new PartitionsDialog(_imageWorker.Partitions, _imageWorker.BytesPerSector);
             dialog.ShowDialog();
         }
 

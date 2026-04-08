@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:NetImage.Views"
         xmlns:vm="clr-namespace:NetImage.ViewModels"
-        Title="{Binding WindowTitle}" Height="450" Width="840" MinWidth="600" MinHeight="300"
+        Title="{Binding WindowTitle}" Height="480" Width="945" MinWidth="640" MinHeight="300"
         Icon="/diskette.ico"
         AllowDrop="True"
         PreviewDragOver="OnWindowPreviewDragOver">

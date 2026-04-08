@@ -39,6 +39,7 @@ namespace NetImage.Workers
         public List<FileEntry> FilesAndFolders { get; private set; }
         public IReadOnlyList<MbrPartition> Partitions => _partitions;
         private readonly List<MbrPartition> _partitions = new();
+        public uint BytesPerSector { get; private set; } = 512;
 
         public bool IsLoaded
         {
@@ -114,6 +115,7 @@ namespace NetImage.Workers
             System.Diagnostics.Debug.WriteLine($"FAT boot sector found at sector {_partitionStartSector}");
 
             var bpb = ParseBpb(bootSector);
+            BytesPerSector = bpb.BytesPerSector;
             _fatType = GetFatType(bpb);
             if (_fatType == FatType.Fat32)
             {
