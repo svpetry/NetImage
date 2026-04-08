@@ -1414,9 +1414,16 @@ namespace NetImage.Workers
                 if (IsDeletedEntry(firstByte))
                     continue;
 
-                var entryName = DecodeEntryName(entry);
-                if (entryName == "." || entryName == "..") continue;
+                if (IsLfNEntry(entry))
+                    continue;
+
+                var shortName = DecodeEntryName(entry);
+                if (shortName == "." || shortName == "..") continue;
                 if ((entry[11] & 0x08) != 0) continue; // volume label
+
+                // Try to get LFN name for comparison
+                var longName = ReadLongFileName(offset, bpb);
+                var entryName = longName ?? shortName;
 
                 if (IsDirectoryEntry(entry) && entryName.Equals(name, StringComparison.OrdinalIgnoreCase))
                     return GetFirstCluster(entry);
