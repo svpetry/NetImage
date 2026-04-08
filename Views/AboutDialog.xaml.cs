@@ -21,11 +21,11 @@ namespace NetImage.Views
 
             Loaded += async (s, e) =>
             {
-                await FetchReleaseDateAsync();
+                await FetchReleaseDateAsync(version);
             };
         }
 
-        private async Task FetchReleaseDateAsync()
+        private async Task FetchReleaseDateAsync(string version)
         {
             try
             {
@@ -38,21 +38,66 @@ namespace NetImage.Views
                 var tagsJson = await tagsResponse.Content.ReadAsStringAsync();
                 using var tagsDoc = JsonDocument.Parse(tagsJson);
 
+                Version? currentVersion = null;
+                Version? latestVersion = null;
+                string? latestVersionTag = null;
+
                 foreach (var tag in tagsDoc.RootElement.EnumerateArray())
                 {
-                    var commitUrl = tag.GetProperty("commit").GetProperty("url").GetString();
-                    if (string.IsNullOrEmpty(commitUrl)) continue;
+                    var tagName = tag.GetProperty("name").GetString();
+                    if (tagName == null || !tagName.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+                        continue;
 
-                    var commitResponse = await client.GetAsync(commitUrl);
-                    if (!commitResponse.IsSuccessStatusCode) continue;
+                    var tagVersionStr = tagName.Substring(1);
+                    if (!Version.TryParse(tagVersionStr, out var tagVersion))
+                        continue;
 
-                    var commitJson = await commitResponse.Content.ReadAsStringAsync();
-                    using var commitDoc = JsonDocument.Parse(commitJson);
-                    var dateStr = commitDoc.RootElement.GetProperty("commit").GetProperty("author").GetProperty("date").GetString();
-                    if (!string.IsNullOrEmpty(dateStr))
+                    if (tagName.Equals($"v{version}", StringComparison.OrdinalIgnoreCase))
                     {
-                        Dispatcher.Invoke(() => ReleaseDateRun.Text = dateStr.Split('T')[0]);
-                        return;
+                        currentVersion = tagVersion;
+                    }
+
+                    if (latestVersion == null || tagVersion > latestVersion)
+                    {
+                        latestVersion = tagVersion;
+                        latestVersionTag = tagName;
+                    }
+                }
+
+                if (currentVersion != null && latestVersion != null && latestVersion > currentVersion)
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        NewVersionTextBlock.Visibility = Visibility.Visible;
+                        NewVersionRun.Text = latestVersionTag;
+                    });
+                }
+                else if (currentVersion != null)
+                {
+                    var commitUrl = "";
+                    foreach (var tag in tagsDoc.RootElement.EnumerateArray())
+                    {
+                        var tagName = tag.GetProperty("name").GetString();
+                        if (tagName != null && tagName.Equals($"v{version}", StringComparison.OrdinalIgnoreCase))
+                        {
+                            commitUrl = tag.GetProperty("commit").GetProperty("url").GetString() ?? "";
+                            break;
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(commitUrl))
+                    {
+                        var commitResponse = await client.GetAsync(commitUrl);
+                        if (commitResponse.IsSuccessStatusCode)
+                        {
+                            var commitJson = await commitResponse.Content.ReadAsStringAsync();
+                            using var commitDoc = JsonDocument.Parse(commitJson);
+                            var dateStr = commitDoc.RootElement.GetProperty("commit").GetProperty("author").GetProperty("date").GetString();
+                            if (!string.IsNullOrEmpty(dateStr))
+                            {
+                                Dispatcher.Invoke(() => ReleaseDateRun.Text = dateStr.Split('T')[0]);
+                            }
+                        }
                     }
                 }
             }
