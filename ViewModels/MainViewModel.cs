@@ -1301,7 +1301,7 @@ namespace NetImage.ViewModels
         {
             var hasLoadedImage = _imageWorker != null && _imageWorker.IsLoaded;
             var hasWorker = _imageWorker != null;
-            var hasSelection = _selectedItem != null;
+            var hasSelection = _selectedItems.Count > 0;
 
             NewCommand.Enabled = !IsBusy;
             OpenCommand.Enabled = !IsBusy;
