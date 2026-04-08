@@ -9,22 +9,19 @@ namespace NetImage.Views
 {
     public partial class AboutDialog : Window
     {
-        public AboutDialog(string applicationName, string version, string repositoryUrl, string releaseDate)
+        public AboutDialog(string applicationName, string version, string repositoryUrl)
         {
             InitializeComponent();
 
             ApplicationNameTextBlock.Text = applicationName;
             VersionRun.Text = version;
-            ReleaseDateRun.Text = string.IsNullOrEmpty(releaseDate) ? "..." : releaseDate;
+            ReleaseDateRun.Text = "...";
             RepositoryLinkRun.Text = repositoryUrl;
             RepositoryHyperlink.NavigateUri = new Uri(repositoryUrl);
 
             Loaded += async (s, e) =>
             {
-                if (string.IsNullOrEmpty(releaseDate))
-                {
-                    await FetchReleaseDateAsync();
-                }
+                await FetchReleaseDateAsync();
             };
         }
 

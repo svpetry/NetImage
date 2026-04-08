@@ -566,7 +566,7 @@ namespace NetImage.Views
 
         private void OnAboutRequested(object? sender, AboutRequestEventArgs e)
         {
-            var dialog = new AboutDialog(e.ApplicationName, e.Version, e.RepositoryUrl, e.ReleaseDate)
+            var dialog = new AboutDialog(e.ApplicationName, e.Version, e.RepositoryUrl)
             {
                 Owner = this
             };

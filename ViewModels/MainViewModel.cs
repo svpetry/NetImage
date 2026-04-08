@@ -327,7 +327,7 @@ namespace NetImage.ViewModels
 
         private void ExecuteAbout(object? parameter)
         {
-            AboutRequested?.Invoke(this, new AboutRequestEventArgs(ApplicationName, ApplicationVersion, RepositoryUrl, ""));
+            AboutRequested?.Invoke(this, new AboutRequestEventArgs(ApplicationName, ApplicationVersion, RepositoryUrl));
         }
 
         private async void ExecuteOpen(object? parameter)
