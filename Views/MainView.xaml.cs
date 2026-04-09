@@ -349,6 +349,27 @@ namespace NetImage.Views
             if (e.OriginalSource is TextBox)
                 return;
 
+            // Handle F2 for rename and Delete for delete
+            if (e.Key == Key.F2)
+            {
+                if (DataContext is MainViewModel vm && vm.RenameCommand.CanExecute(null))
+                {
+                    vm.RenameCommand.Execute(null);
+                }
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Delete)
+            {
+                if (DataContext is MainViewModel vm && vm.DeleteCommand.CanExecute(null))
+                {
+                    vm.DeleteCommand.Execute(null);
+                }
+                e.Handled = true;
+                return;
+            }
+
             var key = e.Key;
             char? ch = null;
 
