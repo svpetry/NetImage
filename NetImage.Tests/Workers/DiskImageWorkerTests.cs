@@ -1329,6 +1329,7 @@ namespace NetImage.Tests.Workers
             await newWorker.OpenAsync();
             var paths = newWorker.FilesAndFolders.Select(f => f.Path).ToList();
             Assert.That(paths, Does.Contain("MyLongFileName.Txt"));
+            Assert.That(newWorker.GetFileContent("MyLongFileName.Txt"), Is.EqualTo(fileContent));
         }
 
         [Test]
@@ -1426,6 +1427,84 @@ namespace NetImage.Tests.Workers
             await newWorker.OpenAsync();
             Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(),
                 Does.Contain("SUBDIR\\AVeryLongFileNameInSubdir.Txt"));
+        }
+
+        [Test]
+        public async Task CreateFolder_WithLongName_PreservesFullName()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "folder-lfn.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+
+            // Act
+            worker.CreateFolder(string.Empty, "My Long Folder");
+            await worker.SaveAsync(filePath);
+
+            // Assert
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            Assert.That(newWorker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain("My Long Folder"));
+        }
+
+        [Test]
+        public async Task CreateFolder_WritesSpacePaddedDotEntries()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "dot-entries.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+
+            // Act
+            worker.CreateFolder(string.Empty, "SUBDIR");
+            await worker.SaveAsync(filePath);
+
+            // Assert
+            var image = await File.ReadAllBytesAsync(filePath);
+            var bytesPerSector = BitConverter.ToUInt16(image, 11);
+            var sectorsPerCluster = image[13];
+            var reservedSectors = BitConverter.ToUInt16(image, 14);
+            var numFats = image[16];
+            var rootDirEntries = BitConverter.ToUInt16(image, 17);
+            var sectorsPerFat = BitConverter.ToUInt16(image, 22);
+            var rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
+            var rootDirOffset = (reservedSectors + (numFats * sectorsPerFat)) * bytesPerSector;
+            var folderEntryOffset = image[rootDirOffset + 11] == 0x08 ? rootDirOffset + 32 : rootDirOffset;
+            var firstCluster = BitConverter.ToUInt16(image, folderEntryOffset + 26);
+
+            Assert.That(firstCluster, Is.GreaterThan(1));
+
+            var dataOffset = (reservedSectors + (numFats * sectorsPerFat) + rootDirSectors) * bytesPerSector;
+            var directoryOffset = dataOffset + ((firstCluster - 2) * sectorsPerCluster * bytesPerSector);
+
+            Assert.That(Encoding.ASCII.GetString(image, directoryOffset, 11), Is.EqualTo(".          "));
+            Assert.That(Encoding.ASCII.GetString(image, directoryOffset + 32, 11), Is.EqualTo("..         "));
+            Assert.That(image[directoryOffset + 11], Is.EqualTo(0x10));
+            Assert.That(image[directoryOffset + 32 + 11], Is.EqualTo(0x10));
+        }
+
+        [Test]
+        public async Task RenameEntry_WithLongFileName_PreservesFullName()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "rename-lfn.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+            var content = Encoding.ASCII.GetBytes("Test content");
+            worker.AddFile("MyLongFileName.Txt", content);
+
+            // Act
+            worker.RenameEntry("MyLongFileName.Txt", "RenamedLongFile.Txt");
+            await worker.SaveAsync(filePath);
+
+            // Assert
+            var newWorker = new DiskImageWorker(filePath);
+            await newWorker.OpenAsync();
+            var paths = newWorker.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.That(paths, Does.Not.Contain("MyLongFileName.Txt"));
+            Assert.That(paths, Does.Contain("RenamedLongFile.Txt"));
+            Assert.That(newWorker.GetFileContent("RenamedLongFile.Txt"), Is.EqualTo(content));
         }
 
         [Test]

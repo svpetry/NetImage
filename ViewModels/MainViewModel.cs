@@ -385,7 +385,7 @@ namespace NetImage.ViewModels
             {
                 StatusText = worker.FilesystemType == DiskImageWorker.FatType.Fat32
                     ? "FAT32 images are not supported"
-                    : $"Could not open image: {filePath}";
+                    : "Image is not formatted or has an unsupported format";
                 return;
             }
 

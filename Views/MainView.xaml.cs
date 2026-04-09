@@ -61,6 +61,8 @@ namespace NetImage.Views
         private bool _isDragging;
         private List<TreeItem>? _currentDragItems;
         private TreeItem? _currentDropTarget;
+        private bool _restoreSelection;
+        private List<TreeItem>? _previousSelection;
 
         private void OnListViewMouseMove(object sender, MouseEventArgs e)
         {
@@ -71,6 +73,17 @@ namespace NetImage.Views
             if (System.Math.Abs(diff.X) > SystemParameters.MinimumHorizontalDragDistance ||
                 System.Math.Abs(diff.Y) > SystemParameters.MinimumVerticalDragDistance)
             {
+                // Restore selection if clicking on an already-selected item
+                if (_restoreSelection && _previousSelection != null)
+                {
+                    MainListView.SelectedItems.Clear();
+                    foreach (var selectedItem in _previousSelection)
+                    {
+                        if (selectedItem != null)
+                            MainListView.SelectedItems.Add(selectedItem);
+                    }
+                }
+
                 _isDragging = true;
 
                 if (DataContext is MainViewModel vm && MainListView.SelectedItems.Count > 0)
@@ -93,6 +106,8 @@ namespace NetImage.Views
                             DragPopup.IsOpen = false;
                             SetDropTarget(null);
                             _currentDragItems = null;
+                            _restoreSelection = false;
+                            _previousSelection = null;
                         }
                     }
                 }
@@ -104,6 +119,15 @@ namespace NetImage.Views
         private void OnListViewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             _dragStartPoint = e.GetPosition(this);
+
+            // If the click was on an already-selected item, preserve the selection
+            // WPF's default behavior clears multi-selection when clicking on a selected item
+            var clickedItem = MainListView.ContainerFromElement(e.OriginalSource as DependencyObject) as ListViewItem;
+            if (clickedItem?.DataContext is TreeItem item && MainListView.SelectedItems.Contains(item))
+            {
+                _restoreSelection = true;
+                _previousSelection = MainListView.SelectedItems.Cast<TreeItem>().ToList();
+            }
         }
 
         private void OnListViewGiveFeedback(object sender, GiveFeedbackEventArgs e)

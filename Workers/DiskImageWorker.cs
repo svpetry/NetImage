@@ -23,7 +23,8 @@ namespace NetImage.Workers
         private enum ParseResult
         {
             Loaded,
-            UnsupportedFat32
+            UnsupportedFat32,
+            NotFormatted
         }
 
         public DiskImageWorker(string filePath)
@@ -109,7 +110,7 @@ namespace NetImage.Workers
                 System.Diagnostics.Debug.WriteLine($"First 16 bytes: [{string.Join(" ", bootSector.Slice(0, 16).ToArray().Select(b => b.ToString("X2")))}]");
                 System.Diagnostics.Debug.WriteLine($"Bytes 11-15 (BPB area): [{string.Join(" ", bootSector.Slice(11, 5).ToArray().Select(b => b.ToString("X2")))}]");
                 System.Diagnostics.Debug.WriteLine($"Signature bytes 510-511: {bootSector[510]:X2} {bootSector[511]:X2}");
-                return ParseResult.Loaded;
+                return ParseResult.NotFormatted;
             }
 
             System.Diagnostics.Debug.WriteLine($"FAT boot sector found at sector {_partitionStartSector}");
@@ -348,7 +349,7 @@ namespace NetImage.Workers
             => bpb.TotalSectors16 != 0 ? bpb.TotalSectors16 : bpb.TotalSectors32;
 
         private uint GetRootDirSizeSectors(Bpb bpb)
-            => ((bpb.RootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector;
+            => bpb.BytesPerSector == 0 ? 0 : ((bpb.RootDirEntries * 32) + (bpb.BytesPerSector - 1)) / bpb.BytesPerSector;
 
         private uint GetRootDirStartSector(Bpb bpb)
             => _partitionStartSector + bpb.ReservedSectors + (bpb.NumFats * bpb.SectorsPerFat);
@@ -696,7 +697,7 @@ namespace NetImage.Workers
 
         // LFN (Long File Name) constants per VFAT specification
         private const byte ATTR_LFN = 0x0F; // Combination of READ_ONLY + HIDDEN + SYSTEM + VOLUME_LABEL
-        private const int LFN_NAME_PART1_SIZE = 5; // Bytes 0-9: 5 Unicode chars (10 bytes)
+        private const int LFN_NAME_PART1_SIZE = 5; // Bytes 1-10: 5 Unicode chars (10 bytes)
         private const int LFN_NAME_PART2_SIZE = 6; // Bytes 14-25: 6 Unicode chars (12 bytes)
         private const int LFN_NAME_PART3_SIZE = 2; // Bytes 28-31: 2 Unicode chars (4 bytes)
         private const int LFN_CHARS_PER_ENTRY = 13; // Max Unicode chars per LFN entry
@@ -737,7 +738,7 @@ namespace NetImage.Workers
             byte checksum = 0;
             for (int i = 0; i < 11; i++)
             {
-                checksum = (byte)(((checksum & 1) == 1 ? (byte)0x80 : (byte)0) ^ (byte)(checksum >> 1) ^ shortName[i]);
+                checksum = (byte)(((checksum & 1) << 7) + (checksum >> 1) + shortName[i]);
             }
             return checksum;
         }
@@ -750,10 +751,10 @@ namespace NetImage.Workers
         {
             var result = new System.Text.StringBuilder(LFN_CHARS_PER_ENTRY);
 
-            // Part 1: 5 characters at offsets 0-9 (2 bytes each)
+            // Part 1: 5 characters at offsets 1-10 (2 bytes each)
             for (int i = 0; i < LFN_NAME_PART1_SIZE; i++)
             {
-                int offset = i * 2;
+                int offset = 1 + i * 2;
                 ushort ch = BitConverter.ToUInt16(entry.Slice(offset, 2));
                 if (ch == 0xFFFF || ch == 0x0000) return result.ToString();
                 result.Append((char)ch);
@@ -782,7 +783,7 @@ namespace NetImage.Workers
 
         /// <summary>
         /// Reads consecutive LFN entries preceding a short name entry and combines them into a full name.
-        /// LFN entries are stored in reverse order (last entry closest to short name).
+        /// Valid VFAT entries appear as N|LAST, N-1, ..., 1, then the short name entry.
         /// </summary>
         private string? ReadLongFileName(int shortNameOffset, Bpb bpb)
         {
@@ -810,17 +811,13 @@ namespace NetImage.Workers
                 return null; // No LFN
             }
 
-            var sequenceNumber = GetLfNSequenceNumber(firstByte);
-            if (sequenceNumber == 0)
-            {
-                return null; // Invalid sequence number
-            }
+            var lfnParts = new List<string>();
+            byte expectedSequence = 1;
+            bool foundLastEntry = false;
 
-            var lfnParts = new List<string>(sequenceNumber);
-            int lfnEntriesRead = 0;
-
-            // Read LFN entries backwards until we reach the first one
-            while (lfnEntriesRead < sequenceNumber)
+            // Read backwards from the short name entry:
+            // the closest LFN entry is sequence 1, then 2, and so on until the LAST entry.
+            while (offset >= 0)
             {
                 entry = new ReadOnlySpan<byte>(imageData, offset, 32);
                 firstByte = entry[0];
@@ -833,28 +830,28 @@ namespace NetImage.Workers
                 if (!IsLfNEntry(entry))
                     break;
 
-                var (_, actualChecksum) = (GetLfNSequenceNumber(firstByte), entry[13]);
-
-                // Verify checksum on the first LFN entry (the one closest to short name)
-                if (lfnEntriesRead == 0 && actualChecksum != expectedChecksum)
-                {
-                    // Checksum mismatch - LFN is corrupted, fall back to short name
+                var sequenceNumber = GetLfNSequenceNumber(firstByte);
+                if (sequenceNumber != expectedSequence)
                     return null;
-                }
+
+                if (entry[13] != expectedChecksum)
+                    return null;
 
                 lfnParts.Add(DecodeLfNEntry(entry));
-                lfnEntriesRead++;
+
+                if (IsLastLfNEntry(firstByte))
+                {
+                    foundLastEntry = true;
+                    break;
+                }
 
                 // Move to previous entry
+                expectedSequence++;
                 offset -= 32;
-
-                // Make sure we don't go out of bounds
-                if (offset < 0 || offset + 32 > imageData.Length)
-                    break;
             }
 
-            // LFN parts were read in reverse order, so reverse them back
-            lfnParts.Reverse();
+            if (!foundLastEntry)
+                return null;
 
             // Combine all parts
             var fullLfN = string.Join("", lfnParts);
@@ -1060,16 +1057,22 @@ namespace NetImage.Workers
                 if (IsDeletedEntry(firstByte))
                     continue;
 
-                var name = DecodeEntryName(entry);
+                if (IsLfNEntry(entry))
+                    continue;
 
                 // Skip volume label entries
                 const byte ATTR_VOLUME_LABEL = 0x08;
                 if ((entry[11] & ATTR_VOLUME_LABEL) != 0)
                     continue;
 
+                var shortName = DecodeEntryName(entry);
+
                 // Skip special entries
-                if (name == "." || name == "..")
+                if (shortName == "." || shortName == "..")
                     continue;
+
+                var longName = ReadLongFileName(offset, bpb);
+                var name = longName ?? shortName;
 
                 // Check if this is the file we're looking for
                 if (name.Equals(fileName, StringComparison.OrdinalIgnoreCase))
@@ -1128,6 +1131,8 @@ namespace NetImage.Workers
 
             var partitionByteOffset = _partitionStartSector * 512;
             var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512));
+            if (bpb.BytesPerSector == 0 || bpb.SectorsPerCluster == 0)
+                return 0;
             return (long)bpb.ClusterCount * bpb.BytesPerSector * bpb.SectorsPerCluster;
         }
 
@@ -1139,6 +1144,9 @@ namespace NetImage.Workers
 
             var partitionByteOffset = _partitionStartSector * 512;
             var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512));
+            if (bpb.BytesPerSector == 0 || bpb.SectorsPerCluster == 0)
+                return 0;
+
             long clusterSize = bpb.BytesPerSector * bpb.SectorsPerCluster;
             long freeBytes = 0;
 
@@ -1253,10 +1261,16 @@ namespace NetImage.Workers
                 if (IsDeletedEntry(firstByte))
                     continue;
 
-                var entryName = DecodeEntryName(entry);
-                if (entryName == "." || entryName == "..") continue;
+                if (IsLfNEntry(entry))
+                    continue;
+
+                var shortName = DecodeEntryName(entry);
+                if (shortName == "." || shortName == "..") continue;
                 if ((entry[11] & 0x08) != 0) continue; // volume label
                 if (IsDirectoryEntry(entry)) continue;
+
+                var longName = ReadLongFileName(offset, bpb);
+                var entryName = longName ?? shortName;
 
                 if (entryName.Equals(fileName, StringComparison.OrdinalIgnoreCase))
                 {
@@ -1636,12 +1650,24 @@ namespace NetImage.Workers
             var imageData = _imageData!;
             var entrySize = 32;
 
+            var now = DateTime.Now;
+            ushort fatTime = (ushort)((now.Hour << 11) | (now.Minute << 5) | (now.Second / 2));
+            ushort fatDate = (ushort)(((Math.Max(1980, now.Year) - 1980) << 9) | (now.Month << 5) | now.Day);
+            var timeBytes = BitConverter.GetBytes(fatTime);
+            var dateBytes = BitConverter.GetBytes(fatDate);
+
             // "." entry - points to this directory
             var dotOffset = (int)(directory.StartSector * bpb.BytesPerSector);
             Array.Clear(imageData, dotOffset, entrySize);
             imageData[dotOffset] = (byte)'.';
-            for (int i = 1; i < 8; i++) imageData[dotOffset + i] = (byte)' ';
+            for (int i = 1; i < 11; i++) imageData[dotOffset + i] = (byte)' ';
             imageData[dotOffset + 11] = 0x10; // Directory attribute
+            
+            imageData[dotOffset + 22] = timeBytes[0];
+            imageData[dotOffset + 23] = timeBytes[1];
+            imageData[dotOffset + 24] = dateBytes[0];
+            imageData[dotOffset + 25] = dateBytes[1];
+
             imageData[dotOffset + 26] = (byte)(thisCluster & 0xFF);
             imageData[dotOffset + 27] = (byte)((thisCluster >> 8) & 0xFF);
 
@@ -1650,8 +1676,14 @@ namespace NetImage.Workers
             Array.Clear(imageData, dotDotOffset, entrySize);
             imageData[dotDotOffset] = (byte)'.';
             imageData[dotDotOffset + 1] = (byte)'.';
-            for (int i = 2; i < 8; i++) imageData[dotDotOffset + i] = (byte)' ';
+            for (int i = 2; i < 11; i++) imageData[dotDotOffset + i] = (byte)' ';
             imageData[dotDotOffset + 11] = 0x10; // Directory attribute
+
+            imageData[dotDotOffset + 22] = timeBytes[0];
+            imageData[dotDotOffset + 23] = timeBytes[1];
+            imageData[dotDotOffset + 24] = dateBytes[0];
+            imageData[dotDotOffset + 25] = dateBytes[1];
+
             imageData[dotDotOffset + 26] = (byte)(parentCluster & 0xFF);
             imageData[dotDotOffset + 27] = (byte)((parentCluster >> 8) & 0xFF);
         }
@@ -1684,7 +1716,7 @@ namespace NetImage.Workers
 
         /// <summary>
         /// Writes LFN entries for a long filename.
-        /// Entries are written in forward order (entry 1 first, entry N last, closest to short name).
+        /// On disk, valid VFAT entries appear as N|LAST, N-1, ..., 1, then the short name entry.
         /// </summary>
         private void WriteLfNEntries(int offset, string longName, byte[] shortNameBytes, int lfnEntriesNeeded)
         {
@@ -1693,12 +1725,12 @@ namespace NetImage.Workers
 
             for (int entryNum = 1; entryNum <= lfnEntriesNeeded; entryNum++)
             {
-                int entryOffset = offset + ((entryNum - 1) * 32);
+                int entryOffset = offset + ((lfnEntriesNeeded - entryNum) * 32);
 
                 // Clear the entry
                 Array.Clear(imageData, entryOffset, 32);
 
-                // Set sequence number (bit 6 set for last entry, closest to short name)
+                // Set sequence number. The LAST flag belongs on the farthest entry (highest sequence number).
                 byte sequenceByte = (byte)entryNum;
                 if (entryNum == lfnEntriesNeeded)
                     sequenceByte |= 0x40; // Last LFN entry flag
@@ -1710,20 +1742,25 @@ namespace NetImage.Workers
                 // Calculate which characters go in this entry
                 int charStart = (entryNum - 1) * LFN_CHARS_PER_ENTRY;
 
-                // Part 1: 5 characters at offsets 0-9
+                // Part 1: 5 characters at offsets 1-10
                 for (int i = 0; i < LFN_NAME_PART1_SIZE; i++)
                 {
                     int charIdx = charStart + i;
                     if (charIdx < longName.Length)
                     {
                         var bytes = BitConverter.GetBytes((ushort)longName[charIdx]);
-                        imageData[entryOffset + i * 2] = bytes[0];
-                        imageData[entryOffset + i * 2 + 1] = bytes[1];
+                        imageData[entryOffset + 1 + i * 2] = bytes[0];
+                        imageData[entryOffset + 1 + i * 2 + 1] = bytes[1];
+                    }
+                    else if (charIdx == longName.Length)
+                    {
+                        imageData[entryOffset + 1 + i * 2] = 0x00;
+                        imageData[entryOffset + 1 + i * 2 + 1] = 0x00;
                     }
                     else
                     {
-                        imageData[entryOffset + i * 2] = 0xFF;
-                        imageData[entryOffset + i * 2 + 1] = 0xFF;
+                        imageData[entryOffset + 1 + i * 2] = 0xFF;
+                        imageData[entryOffset + 1 + i * 2 + 1] = 0xFF;
                     }
                 }
 
@@ -1736,6 +1773,11 @@ namespace NetImage.Workers
                         var bytes = BitConverter.GetBytes((ushort)longName[charIdx]);
                         imageData[entryOffset + 14 + i * 2] = bytes[0];
                         imageData[entryOffset + 14 + i * 2 + 1] = bytes[1];
+                    }
+                    else if (charIdx == longName.Length)
+                    {
+                        imageData[entryOffset + 14 + i * 2] = 0x00;
+                        imageData[entryOffset + 14 + i * 2 + 1] = 0x00;
                     }
                     else
                     {
@@ -1753,6 +1795,11 @@ namespace NetImage.Workers
                         var bytes = BitConverter.GetBytes((ushort)longName[charIdx]);
                         imageData[entryOffset + 28 + i * 2] = bytes[0];
                         imageData[entryOffset + 28 + i * 2 + 1] = bytes[1];
+                    }
+                    else if (charIdx == longName.Length)
+                    {
+                        imageData[entryOffset + 28 + i * 2] = 0x00;
+                        imageData[entryOffset + 28 + i * 2 + 1] = 0x00;
                     }
                     else
                     {
@@ -2075,85 +2122,14 @@ namespace NetImage.Workers
                         // Update LFN entries and short name
                         var newShortName = EncodeFileName(newName);
                         var shortNameBytes = System.Text.Encoding.ASCII.GetBytes(newShortName);
-                        byte newChecksum = CalculateChecksum(shortNameBytes.AsSpan());
-
-                        // Update LFN entries with new name and checksum
-                        for (int i = 0; i < newLfnCount; i++)
-                        {
-                            int lfnOffset = offset - ((newLfnCount - i) * 32);
-                            // Clear and update
-                            Array.Clear(imageData, lfnOffset, 32);
-
-                            // Set sequence number
-                            byte seqNum = (byte)(i + 1);
-                            if (i == newLfnCount - 1)
-                                seqNum |= 0x40; // Last entry flag
-                            imageData[lfnOffset] = seqNum;
-                            imageData[lfnOffset + 11] = ATTR_LFN;
-
-                            // Write characters for this entry
-                            int charStart = i * LFN_CHARS_PER_ENTRY;
-
-                            // Part 1: 5 chars at offsets 0-9
-                            for (int j = 0; j < LFN_NAME_PART1_SIZE; j++)
-                            {
-                                int charIdx = charStart + j;
-                                if (charIdx < newName.Length)
-                                {
-                                    var bytes = BitConverter.GetBytes((ushort)newName[charIdx]);
-                                    imageData[lfnOffset + j * 2] = bytes[0];
-                                    imageData[lfnOffset + j * 2 + 1] = bytes[1];
-                                }
-                                else
-                                {
-                                    imageData[lfnOffset + j * 2] = 0xFF;
-                                    imageData[lfnOffset + j * 2 + 1] = 0xFF;
-                                }
-                            }
-
-                            // Part 2: 6 chars at offsets 14-25
-                            for (int j = 0; j < LFN_NAME_PART2_SIZE; j++)
-                            {
-                                int charIdx = charStart + LFN_NAME_PART1_SIZE + j;
-                                if (charIdx < newName.Length)
-                                {
-                                    var bytes = BitConverter.GetBytes((ushort)newName[charIdx]);
-                                    imageData[lfnOffset + 14 + j * 2] = bytes[0];
-                                    imageData[lfnOffset + 14 + j * 2 + 1] = bytes[1];
-                                }
-                                else
-                                {
-                                    imageData[lfnOffset + 14 + j * 2] = 0xFF;
-                                    imageData[lfnOffset + 14 + j * 2 + 1] = 0xFF;
-                                }
-                            }
-
-                            // Part 3: 2 chars at offsets 28-31
-                            for (int j = 0; j < LFN_NAME_PART3_SIZE; j++)
-                            {
-                                int charIdx = charStart + LFN_NAME_PART1_SIZE + LFN_NAME_PART2_SIZE + j;
-                                if (charIdx < newName.Length)
-                                {
-                                    var bytes = BitConverter.GetBytes((ushort)newName[charIdx]);
-                                    imageData[lfnOffset + 28 + j * 2] = bytes[0];
-                                    imageData[lfnOffset + 28 + j * 2 + 1] = bytes[1];
-                                }
-                                else
-                                {
-                                    imageData[lfnOffset + 28 + j * 2] = 0xFF;
-                                    imageData[lfnOffset + 28 + j * 2 + 1] = 0xFF;
-                                }
-                            }
-
-                            imageData[lfnOffset + 13] = newChecksum;
-                        }
+                        WriteLfNEntries(offset - (newLfnCount * 32), newName, shortNameBytes, newLfnCount);
 
                         // Update short name entry
                         var entryBuffer = new byte[32];
                         entry.CopyTo(entryBuffer);
-                        for (int i = 0; i < 11 && i < newShortName.Length; i++)
+                        for (int i = 0; i < shortNameBytes.Length; i++)
                         {
-                            entryBuffer[i] = (byte)newShortName[i];
+                            entryBuffer[i] = shortNameBytes[i];
                         }
                         entryBuffer.AsSpan().CopyTo(imageData.AsSpan(offset, 32));
                     }
@@ -2171,9 +2147,10 @@ namespace NetImage.Workers
                         // Update short name entry
                         var entryBuffer = new byte[32];
                         entry.CopyTo(entryBuffer);
-                        for (int i = 0; i < 11 && i < newShortName.Length; i++)
+                        var shortNameBytes = System.Text.Encoding.ASCII.GetBytes(newShortName);
+                        for (int i = 0; i < shortNameBytes.Length; i++)
                         {
-                            entryBuffer[i] = (byte)newShortName[i];
+                            entryBuffer[i] = shortNameBytes[i];
                         }
                         entryBuffer.AsSpan().CopyTo(imageData.AsSpan(offset, 32));
                     }
