@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:NetImage.Views"
         xmlns:vm="clr-namespace:NetImage.ViewModels"
         Title="{Binding WindowTitle}" Height="480" Width="945" MinWidth="640" MinHeight="300"
-        Icon="/diskette.ico"
+        Icon="pack://application:,,,/NetImage;component/diskette.ico"
         AllowDrop="True"
         PreviewDragOver="OnWindowPreviewDragOver">
     <Window.DataContext>

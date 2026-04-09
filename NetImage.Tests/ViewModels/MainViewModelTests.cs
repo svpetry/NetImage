@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Text;
 using NetImage.Models;
 using NetImage.ViewModels;
+using NetImage.Views;
 using NetImage.Workers;
 using NUnit.Framework;
 
@@ -12,6 +13,25 @@ namespace NetImage.Tests.ViewModels
     [TestFixture]
     public class MainViewModelTests
     {
+        [Test]
+        public void ApplicationVersion_UsesConfiguredAssemblyVersion()
+        {
+            var version = typeof(MainViewModel).Assembly.GetName().Version;
+            Assert.That(version, Is.Not.Null);
+            Assert.That(version, Is.Not.EqualTo(new Version(0, 0, 0, 0)));
+
+            var viewModel = new MainViewModel();
+
+            Assert.That(viewModel.ApplicationVersion, Is.EqualTo($"{version!.Major}.{version.Minor}"));
+        }
+
+        [Test]
+        [Apartment(System.Threading.ApartmentState.STA)]
+        public void NewDiskImageDialog_CanBeCreated()
+        {
+            Assert.That(() => new NewDiskImageDialog(), Throws.Nothing);
+        }
+
         [Test]
         public void BuildTreeView_WhenCurrentFolderExists_RestoresThatFolder()
         {

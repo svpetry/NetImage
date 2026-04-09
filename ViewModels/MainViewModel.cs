@@ -406,14 +406,20 @@ namespace NetImage.ViewModels
             CurrentFolder = null;
             SelectedItem = null;
 
-            if (_imageWorker == null || _imageWorker.FilesAndFolders.Count == 0)
-            {
-                return;
-            }
-
-            var rootNode = new TreeItem(_imageWorker.VolumeLabel, string.Empty);
+            var rootNode = new TreeItem(_imageWorker?.VolumeLabel ?? string.Empty, string.Empty);
             var nodeByPath = new Dictionary<string, TreeItem>(StringComparer.OrdinalIgnoreCase);
             nodeByPath[""] = rootNode;
+
+            if (_imageWorker == null || _imageWorker.FilesAndFolders.Count == 0)
+            {
+                rootNode.IsExpanded = true;
+                TreeItems.Add(rootNode);
+                CurrentFolder = rootNode;
+                SelectedItem = rootNode;
+                rootNode.IsSelected = true;
+                TreeViewBuilt?.Invoke(this, EventArgs.Empty);
+                return;
+            }
 
             foreach (var entry in _imageWorker.FilesAndFolders)
             {
@@ -697,6 +703,15 @@ namespace NetImage.ViewModels
 
             if (itemsToDelete == null || itemsToDelete.Count == 0)
                 return;
+
+            // Filter out the root node (empty path) - cannot be deleted
+            var rootNode = itemsToDelete.FirstOrDefault(i => string.IsNullOrEmpty(i.Path));
+            if (rootNode != null)
+            {
+                itemsToDelete.Remove(rootNode);
+                if (itemsToDelete.Count == 0)
+                    return;
+            }
 
             var worker = _imageWorker;
 
@@ -1062,11 +1077,20 @@ namespace NetImage.ViewModels
 
             try
             {
-                _imageWorker.RenameEntry(item.Path, newName);
+                // Check if renaming the root node (empty path) - this changes the volume label
+                if (string.IsNullOrEmpty(item.Path))
+                {
+                    _imageWorker.SetVolumeLabel(newName);
+                    StatusText = $"Volume label changed to '{newName}'";
+                }
+                else
+                {
+                    _imageWorker.RenameEntry(item.Path, newName);
+                    StatusText = $"Renamed '{item.Name}' to '{newName}'";
+                }
                 BuildTreeView();
                 RefreshDiskSpaceText();
                 HasUnsavedChanges = true;
-                StatusText = $"Renamed '{item.Name}' to '{newName}'";
             }
             catch (Exception ex)
             {
@@ -1302,6 +1326,7 @@ namespace NetImage.ViewModels
             var hasLoadedImage = _imageWorker != null && _imageWorker.IsLoaded;
             var hasWorker = _imageWorker != null;
             var hasSelection = _selectedItems.Count > 0;
+            var hasTreeSelection = _selectedItem != null && _selectedItem.IsFolder;
 
             NewCommand.Enabled = !IsBusy;
             OpenCommand.Enabled = !IsBusy;
@@ -1309,8 +1334,8 @@ namespace NetImage.ViewModels
             AddCommand.Enabled = hasLoadedImage && !IsBusy;
             AddFolderCommand.Enabled = hasLoadedImage && !IsBusy;
             CreateFolderCommand.Enabled = hasLoadedImage && !IsBusy;
-            DeleteCommand.Enabled = hasLoadedImage && hasSelection && !IsBusy;
-            ExtractCommand.Enabled = hasLoadedImage && hasSelection && !IsBusy;
+            DeleteCommand.Enabled = hasLoadedImage && (hasSelection || hasTreeSelection) && !IsBusy;
+            ExtractCommand.Enabled = hasLoadedImage && (hasSelection || hasTreeSelection) && !IsBusy;
             FormatCommand.Enabled = hasLoadedImage && !IsBusy;
             EditCommand.Enabled = hasLoadedImage &&
                                   _selectedItem != null &&
@@ -1319,8 +1344,7 @@ namespace NetImage.ViewModels
                                   !IsBinaryFile(_selectedItem.Name) &&
                                   !IsBusy;
             RenameCommand.Enabled = hasLoadedImage &&
-                                    _selectedItem != null &&
-                                    _selectedItems.Count == 1 &&
+                                    (_selectedItem != null && (hasSelection || hasTreeSelection)) &&
                                     !IsBusy;
             BootSectorCommand.Enabled = hasLoadedImage && !IsBusy;
             PartitionsCommand.Enabled = hasLoadedImage && _imageWorker!.Partitions.Count > 0 && !IsBusy;

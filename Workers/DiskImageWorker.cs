@@ -1892,6 +1892,95 @@ namespace NetImage.Workers
         }
 
         /// <summary>
+        /// Sets the volume label of the disk image.
+        /// </summary>
+        /// <param name="newLabel">The new volume label (max 11 characters, padded with spaces).</param>
+        public void SetVolumeLabel(string newLabel)
+        {
+            if (_imageData == null || !_isLoaded)
+                throw new InvalidOperationException("Image must be opened before setting the volume label.");
+
+            if (newLabel == null)
+                newLabel = string.Empty;
+
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512));
+
+            var rootDirOffset = partitionByteOffset +
+                                (long)bpb.ReservedSectors * bpb.BytesPerSector +
+                                (long)bpb.NumFats * bpb.SectorsPerFat * bpb.BytesPerSector;
+
+            // Search for existing volume label entry in root directory
+            var entryCount = (int)bpb.RootDirEntries;
+            for (int i = 0; i < entryCount; i++)
+            {
+                var offset = (int)(rootDirOffset + i * 32);
+
+                if (offset + 32 > _imageData.Length)
+                    break;
+
+                var entry = new ReadOnlySpan<byte>(_imageData, offset, 32);
+                var firstByte = entry[0];
+
+                if (firstByte == 0x00 || firstByte == 0xE5)
+                    continue;
+
+                // Skip LFN entries
+                if (IsLfNEntry(entry))
+                    continue;
+
+                const byte ATTR_VOLUME_LABEL = 0x08;
+                if ((entry[11] & ATTR_VOLUME_LABEL) != 0)
+                {
+                    // Found volume label entry - update it
+                    UpdateVolumeLabelEntry(_imageData.AsSpan(offset, 32), newLabel);
+                    VolumeLabel = newLabel.Trim();
+                    ParseFatFilesystem();
+                    return;
+                }
+            }
+
+            // No existing volume label found - create one at the first available slot
+            for (int i = 0; i < entryCount; i++)
+            {
+                var offset = (int)(rootDirOffset + i * 32);
+
+                if (offset + 32 > _imageData.Length)
+                    break;
+
+                var entry = new ReadOnlySpan<byte>(_imageData, offset, 32);
+                var firstByte = entry[0];
+
+                if (firstByte == 0x00 || firstByte == 0xE5)
+                {
+                    // Found empty slot - create volume label entry
+                    CreateVolumeLabelEntry(_imageData.AsSpan(offset, 32), newLabel);
+                    VolumeLabel = newLabel.Trim();
+                    ParseFatFilesystem();
+                    return;
+                }
+            }
+
+            throw new InvalidOperationException("Could not set volume label: no space available in root directory.");
+        }
+
+        private void UpdateVolumeLabelEntry(Span<byte> entry, string label)
+        {
+            if (label.Length > 11)
+                label = label.Substring(0, 11);
+
+            // Pad label with spaces
+            var paddedLabel = label.PadRight(11);
+            var labelBytes = System.Text.Encoding.ASCII.GetBytes(paddedLabel);
+
+            // Write name (8 bytes) and extension (3 bytes)
+            for (int i = 0; i < 11; i++) entry[i] = labelBytes[i];
+
+            // Attribute: volume label (0x08) - preserve existing attribute bits
+            entry[11] = 0x08;
+        }
+
+        /// <summary>
         /// Moves a file to a different directory within the disk image.
         /// </summary>
         /// <param name="sourcePath">Full path to the source file inside the image.</param>
