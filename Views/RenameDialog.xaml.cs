@@ -12,10 +12,13 @@ namespace NetImage.Views
             Loaded += (s, e) => NameTextBox.Focus();
         }
 
-        public void SetItemInfo(string currentName, bool isFolder)
+        public void SetItemInfo(string currentName, bool isFolder, bool isVolume = false)
         {
             NameTextBox.Text = currentName;
-            PromptTextBlock.Text = $"Enter new {(isFolder ? "folder" : "file")} name:";
+            if (isVolume)
+                PromptTextBlock.Text = "Enter new volume label:";
+            else
+                PromptTextBlock.Text = $"Enter new {(isFolder ? "folder" : "file")} name:";
         }
 
         private void OkButton_Click(object sender, RoutedEventArgs e)

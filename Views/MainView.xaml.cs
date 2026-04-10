@@ -647,7 +647,7 @@ namespace NetImage.Views
         private void OnRenameRequested(object? sender, RenameRequestEventArgs e)
         {
             var dialog = new RenameDialog { Owner = this };
-            dialog.SetItemInfo(e.Item.Name, e.Item.IsFolder);
+            dialog.SetItemInfo(e.Item.Name, e.Item.IsFolder, e.Item.Path == "");
             if (dialog.ShowDialog() == true && !string.IsNullOrEmpty(dialog.NewName))
             {
                 if (DataContext is MainViewModel vm)
