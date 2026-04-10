@@ -225,6 +225,7 @@
                                     <MenuItem Header="Edit" Command="{Binding Data.EditCommand, Source={StaticResource ViewModelProxy}}"/>
                                     <MenuItem Header="Rename" Command="{Binding Data.RenameCommand, Source={StaticResource ViewModelProxy}}"/>
                                     <MenuItem Header="Extract" Command="{Binding Data.ExtractCommand, Source={StaticResource ViewModelProxy}}"/>
+                                    <MenuItem Header="Size" Command="{Binding Data.SizeCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding IsFolder, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                     <MenuItem Header="Delete" Command="{Binding Data.DeleteCommand, Source={StaticResource ViewModelProxy}}"/>
                                 </ContextMenu>
                             </Setter.Value>
