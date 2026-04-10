@@ -436,6 +436,7 @@ namespace NetImage.ViewModels
         private void BuildTreeView()
         {
             var currentFolderPath = GetFolderPathToRestore();
+            var expandedPaths = CollectExpandedPaths(TreeItems);
 
             TreeItems.Clear();
             ClearSelectedItems();
@@ -490,7 +491,15 @@ namespace NetImage.ViewModels
             TreeItems.Add(rootNode);
 
             var restoredFolder = ResolveFolderToRestore(nodeByPath, currentFolderPath);
+
+            // Restore expansion state for all previously expanded folders
+            foreach (var path in expandedPaths)
+            {
+                if (nodeByPath.TryGetValue(path, out var node))
+                    node.IsExpanded = true;
+            }
             ExpandFolderPath(nodeByPath, restoredFolder.Path);
+
             CurrentFolder = restoredFolder;
             SelectedItem = restoredFolder;
             restoredFolder.IsSelected = true;
@@ -498,6 +507,37 @@ namespace NetImage.ViewModels
 
             // Notify the view that the tree has been rebuilt
             TreeViewBuilt?.Invoke(this, EventArgs.Empty);
+        }
+
+        private static HashSet<string> CollectExpandedPaths(IEnumerable<TreeItem> nodes)
+        {
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var stack = new Stack<IEnumerator<TreeItem>>();
+
+            var enumerator = nodes.GetEnumerator();
+            while (true)
+            {
+                while (enumerator.MoveNext())
+                {
+                    var node = enumerator.Current;
+                    if (node.IsExpanded && node.IsFolder)
+                        paths.Add(node.Path);
+
+                    if (node.IsExpanded && node.Children.Count > 0)
+                    {
+                        stack.Push(enumerator);
+                        enumerator = node.Children.GetEnumerator();
+                    }
+                }
+
+                enumerator.Dispose();
+                if (stack.Count == 0)
+                    break;
+
+                enumerator = stack.Pop();
+            }
+
+            return paths;
         }
 
         private string? GetFolderPathToRestore()
