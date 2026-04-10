@@ -56,6 +56,7 @@ namespace NetImage.ViewModels
         public event EventHandler<string>? RenameError;
         public event EventHandler<string>? MoveError;
         public event EventHandler? TreeViewBuilt;
+        public event EventHandler<FolderSizeEventArgs>? FolderSizeRequested;
 
         public MainViewModel()
         {
@@ -74,6 +75,7 @@ namespace NetImage.ViewModels
             BootSectorCommand = new ActionCommand(ExecuteBootSector) { Enabled = false };
             PartitionsCommand = new ActionCommand(ExecutePartitions) { Enabled = false };
             ImageMapCommand = new ActionCommand(ExecuteImageMap) { Enabled = false };
+            SizeCommand = new ActionCommand(ExecuteSize) { Enabled = false };
             SaveCommand = new ActionCommand(ExecuteSave) { Enabled = false };
             SaveAsCommand = new ActionCommand(ExecuteSaveAs) { Enabled = false };
             TreeItems = new ObservableCollection<TreeItem>();
@@ -96,6 +98,7 @@ namespace NetImage.ViewModels
         public ActionCommand BootSectorCommand { get; }
         public ActionCommand PartitionsCommand { get; }
         public ActionCommand ImageMapCommand { get; }
+        public ActionCommand SizeCommand { get; }
         public ActionCommand SaveCommand { get; }
         public ActionCommand SaveAsCommand { get; }
         public string ApplicationVersion => GetApplicationVersion();
@@ -1249,6 +1252,25 @@ namespace NetImage.ViewModels
             dialog.ShowDialog();
         }
 
+        private void ExecuteSize(object? parameter)
+        {
+            if (_imageWorker == null || _selectedItem == null || !_selectedItem.IsFolder || IsBusy)
+                return;
+
+            var folderPath = _selectedItem.Path;
+            var folderName = string.IsNullOrEmpty(folderPath) ? _imageWorker.VolumeLabel : _selectedItem.Name;
+
+            var prefix = string.IsNullOrEmpty(folderPath) ? string.Empty : folderPath + "\\";
+            var entries = _imageWorker.FilesAndFolders
+                .Where(entry => string.IsNullOrEmpty(prefix) || entry.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var totalSize = entries.Sum(e => e.Size ?? 0L);
+            var fileCount = entries.Count(e => e.Size != null);
+            var folderCount = entries.Count(e => e.Size == null);
+
+            FolderSizeRequested?.Invoke(this, new FolderSizeEventArgs(folderName, totalSize, fileCount, folderCount));
+        }
 
         private async void ExecuteSave(object? parameter)
         {
@@ -1429,6 +1451,7 @@ namespace NetImage.ViewModels
             BootSectorCommand.Enabled = hasLoadedImage && !IsBusy;
             PartitionsCommand.Enabled = hasLoadedImage && _imageWorker!.Partitions.Count > 0 && !IsBusy;
             ImageMapCommand.Enabled = hasLoadedImage && !IsBusy;
+            SizeCommand.Enabled = hasLoadedImage && hasTreeSelection && !IsBusy;
             SaveCommand.Enabled = hasLoadedImage && _canSaveCurrentImage && !IsBusy;
             SaveAsCommand.Enabled = hasLoadedImage && !IsBusy;
         }

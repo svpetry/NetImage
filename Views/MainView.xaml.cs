@@ -490,6 +490,7 @@ namespace NetImage.Views
                 vm.MoveError += OnMoveError;
                 vm.FormatRequested += OnFormatRequested;
                 vm.TreeViewBuilt += OnTreeViewBuilt;
+                vm.FolderSizeRequested += OnFolderSizeRequested;
 
                 // Handle command-line file path (for file associations)
                 var filePath = App.CommandLineFilePath;
@@ -515,6 +516,8 @@ namespace NetImage.Views
                     oldVm.RenameRequested -= OnRenameRequested;
                     oldVm.RenameError -= OnRenameError;
                     oldVm.MoveError -= OnMoveError;
+                    oldVm.TreeViewBuilt -= OnTreeViewBuilt;
+                    oldVm.FolderSizeRequested -= OnFolderSizeRequested;
                 }
                 if (e.NewValue is MainViewModel newVm)
                 {
@@ -531,6 +534,7 @@ namespace NetImage.Views
                     newVm.MoveError += OnMoveError;
                     newVm.FormatRequested += OnFormatRequested;
                     newVm.TreeViewBuilt += OnTreeViewBuilt;
+                    newVm.FolderSizeRequested += OnFolderSizeRequested;
                 }
             };
         }
@@ -648,6 +652,28 @@ namespace NetImage.Views
             };
 
             dialog.ShowDialog();
+        }
+
+        private void OnFolderSizeRequested(object? sender, FolderSizeEventArgs e)
+        {
+            var sizeText = e.TotalSize < 1024
+                ? $"{e.TotalSize} bytes"
+                : $"{e.TotalSize:N0} bytes ({FormatSizeDisplay(e.TotalSize)})";
+
+            var message = $"Folder: {e.FolderName}\n\n" +
+                          $"Size: {sizeText}\n" +
+                          $"Files: {e.FileCount}\n" +
+                          $"Folders: {e.FolderCount}";
+
+            MessageBox.Show(message, "Folder Size", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        private static string FormatSizeDisplay(long bytes)
+        {
+            if (bytes < 1024) return $"{bytes} B";
+            if (bytes < 1024L * 1024) return $"{bytes / 1024.0:F1} KB";
+            if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+            return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
         }
 
         private void OnCreateFolderError(object? sender, string message)
