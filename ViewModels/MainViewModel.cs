@@ -32,6 +32,8 @@ namespace NetImage.ViewModels
         private bool _canSaveCurrentImage;
         private bool _hasUnsavedChanges;
         private bool _isBusy;
+        private bool _hasImageError;
+        private string _imageErrorMessage = string.Empty;
         private bool _isProgressVisible;
         private bool _isProgressIndeterminate;
         private double _progressValue;
@@ -138,6 +140,32 @@ namespace NetImage.ViewModels
                     return;
 
                 _isBusy = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool HasImageError
+        {
+            get => _hasImageError;
+            private set
+            {
+                if (_hasImageError == value)
+                    return;
+
+                _hasImageError = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public string ImageErrorMessage
+        {
+            get => _imageErrorMessage;
+            private set
+            {
+                if (string.Equals(_imageErrorMessage, value, StringComparison.Ordinal))
+                    return;
+
+                _imageErrorMessage = value;
                 OnPropertyChanged();
             }
         }
@@ -377,18 +405,26 @@ namespace NetImage.ViewModels
             }
             catch (Exception ex)
             {
-                StatusText = $"Could not open image: {ex.Message}";
+                var message = $"Could not open image: {ex.Message}";
+                StatusText = message;
+                ImageErrorMessage = message;
+                HasImageError = true;
                 return;
             }
 
             if (!worker.IsLoaded)
             {
-                StatusText = worker.FilesystemType == DiskImageWorker.FatType.Fat32
+                var message = worker.FilesystemType == DiskImageWorker.FatType.Fat32
                     ? "FAT32 images are not supported"
                     : "Image is not formatted or has an unsupported format";
+                StatusText = message;
+                ImageErrorMessage = message;
+                HasImageError = true;
                 return;
             }
 
+            HasImageError = false;
+            ImageErrorMessage = string.Empty;
             _imageWorker = worker;
             _canSaveCurrentImage = true;
             BuildTreeView();
@@ -541,6 +577,8 @@ namespace NetImage.ViewModels
             _imageWorker = null;
             _canSaveCurrentImage = false;
             _hasUnsavedChanges = false;
+            HasImageError = false;
+            ImageErrorMessage = string.Empty;
             TreeItems.Clear();
             CurrentFolder = null;
             SelectedItem = null;

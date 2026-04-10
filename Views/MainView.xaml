@@ -279,6 +279,24 @@
                     </GridView>
                 </ListView.View>
             </ListView>
+
+            <!-- Image load error overlay -->
+            <Grid Grid.Column="0" Grid.ColumnSpan="3"
+                  Visibility="{Binding HasImageError, Converter={StaticResource BooleanToVisibilityConverter}}"
+                  Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"
+                  Opacity="0.95">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Margin="40">
+                    <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                               Text="&#xE7BA;" FontSize="64" Foreground="#D13438"
+                               HorizontalAlignment="Center" Margin="0,0,0,16"/>
+                    <TextBlock Text="Cannot display image"
+                               FontSize="20" FontWeight="SemiBold"
+                               HorizontalAlignment="Center" Margin="0,0,0,8"/>
+                    <TextBlock Text="{Binding ImageErrorMessage}"
+                               FontSize="14" Foreground="#616161" TextWrapping="Wrap"
+                               HorizontalAlignment="Center" MaxWidth="500" TextAlignment="Center"/>
+                </StackPanel>
+            </Grid>
         </Grid>
 
         <!-- Status Bar -->
