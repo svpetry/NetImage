@@ -1,9 +1,10 @@
-<Window x:Class="NetImage.Views.MainView"
+<Window x:Class="NetImage.Views.MainView" x:Name="MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:NetImage.Views"
+        xmlns:utils="clr-namespace:NetImage.Utils"
         xmlns:vm="clr-namespace:NetImage.ViewModels"
         Title="{Binding WindowTitle}" Height="480" Width="945" MinWidth="640" MinHeight="300"
         Icon="pack://application:,,,/NetImage;component/diskette.ico"
@@ -14,6 +15,8 @@
     </Window.DataContext>
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+        <local:BindingProxy x:Key="ViewModelProxy" Data="{Binding}"/>
+        <utils:IsEmptyStringToVisibilityConverter x:Key="IsEmptyStringToVisibilityConverter"/>
     </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
@@ -144,7 +147,7 @@
             </Grid.ColumnDefinitions>
 
             <!-- Left pane: Folders Tree -->
-            <TreeView Grid.Column="0" Name="MainTreeView" ItemsSource="{Binding TreeItems}" BorderThickness="0" Padding="0,4" AllowDrop="True" DragOver="OnTreeViewDragOver" Drop="OnTreeViewDrop">
+            <TreeView Grid.Column="0" Name="MainTreeView" ItemsSource="{Binding TreeItems}" BorderThickness="0" Padding="0,4" AllowDrop="True" DragOver="OnTreeViewDragOver" Drop="OnTreeViewDrop" PreviewMouseRightButtonDown="OnTreeViewPreviewMouseRightButtonDown">
                 <TreeView.Resources>
                     <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="Transparent"/>
                     <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="Black"/>
@@ -155,6 +158,30 @@
                     <Style TargetType="TreeViewItem">
                         <Setter Property="IsSelected" Value="{Binding IsSelected, Mode=TwoWay}"/>
                         <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}"/>
+                        <Setter Property="ContextMenu">
+                            <Setter.Value>
+                                <ContextMenu>
+                                    <MenuItem Header="Rename" Command="{Binding Data.RenameCommand, Source={StaticResource ViewModelProxy}}"/>
+                                    <MenuItem Header="Extract" Command="{Binding Data.ExtractCommand, Source={StaticResource ViewModelProxy}}"/>
+                                    <MenuItem x:Name="TreeViewDeleteMenu" Header="Delete" Command="{Binding Data.DeleteCommand, Source={StaticResource ViewModelProxy}}">
+                                        <MenuItem.Style>
+                                            <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Path}" Value="">
+                                                        <Setter Property="IsEnabled" Value="False"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </MenuItem.Style>
+                                    </MenuItem>
+                                    <Separator Visibility="{Binding Path, Converter={StaticResource IsEmptyStringToVisibilityConverter}}"/>
+                                    <MenuItem Header="Format" Command="{Binding Data.FormatCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding Path, Converter={StaticResource IsEmptyStringToVisibilityConverter}}"/>
+                                    <MenuItem Header="Bootsector" Command="{Binding Data.BootSectorCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding Path, Converter={StaticResource IsEmptyStringToVisibilityConverter}}"/>
+                                    <MenuItem Header="Partitions" Command="{Binding Data.PartitionsCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding Path, Converter={StaticResource IsEmptyStringToVisibilityConverter}}"/>
+                                    <MenuItem Header="Image Map" Command="{Binding Data.ImageMapCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding Path, Converter={StaticResource IsEmptyStringToVisibilityConverter}}"/>
+                                </ContextMenu>
+                            </Setter.Value>
+                        </Setter>
                     </Style>
                 </TreeView.ItemContainerStyle>
                 <TreeView.ItemTemplate>
@@ -184,13 +211,23 @@
             <!-- Right pane: Files/Folders List -->
             <ListView Grid.Column="2" Name="MainListView" ItemsSource="{Binding CurrentFolder.Items}" BorderThickness="1,0,0,0" BorderBrush="#EEEEEE" SelectionChanged="MainListView_SelectionChanged"
                       AllowDrop="True" DragOver="OnListViewDragOver" Drop="OnListViewDrop" GiveFeedback="OnListViewGiveFeedback"
-                      PreviewMouseMove="OnListViewMouseMove" PreviewMouseLeftButtonDown="OnListViewMouseLeftButtonDown">
+                      PreviewMouseMove="OnListViewMouseMove" PreviewMouseLeftButtonDown="OnListViewMouseLeftButtonDown" PreviewMouseRightButtonDown="OnListViewPreviewMouseRightButtonDown">
                 <ListView.ItemContainerStyle>
                     <Style TargetType="ListViewItem">
                         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                         <Setter Property="Padding" Value="4,2"/>
                         <Setter Property="BorderThickness" Value="1"/>
                         <Setter Property="BorderBrush" Value="Transparent"/>
+                        <Setter Property="ContextMenu">
+                            <Setter.Value>
+                                <ContextMenu>
+                                    <MenuItem Header="Edit" Command="{Binding Data.EditCommand, Source={StaticResource ViewModelProxy}}"/>
+                                    <MenuItem Header="Rename" Command="{Binding Data.RenameCommand, Source={StaticResource ViewModelProxy}}"/>
+                                    <MenuItem Header="Extract" Command="{Binding Data.ExtractCommand, Source={StaticResource ViewModelProxy}}"/>
+                                    <MenuItem Header="Delete" Command="{Binding Data.DeleteCommand, Source={StaticResource ViewModelProxy}}"/>
+                                </ContextMenu>
+                            </Setter.Value>
+                        </Setter>
                         <EventSetter Event="MouseDoubleClick" Handler="MainListViewItem_MouseDoubleClick"/>
                         <Style.Triggers>
                             <DataTrigger Binding="{Binding IsDropTarget}" Value="True">

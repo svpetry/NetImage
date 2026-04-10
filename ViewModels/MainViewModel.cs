@@ -1327,6 +1327,8 @@ namespace NetImage.ViewModels
             var hasWorker = _imageWorker != null;
             var hasSelection = _selectedItems.Count > 0;
             var hasTreeSelection = _selectedItem != null && _selectedItem.IsFolder;
+            var canDelete = (hasSelection || hasTreeSelection) && 
+                            !(_selectedItem != null && string.IsNullOrEmpty(_selectedItem.Path));
 
             NewCommand.Enabled = !IsBusy;
             OpenCommand.Enabled = !IsBusy;
@@ -1334,7 +1336,7 @@ namespace NetImage.ViewModels
             AddCommand.Enabled = hasLoadedImage && !IsBusy;
             AddFolderCommand.Enabled = hasLoadedImage && !IsBusy;
             CreateFolderCommand.Enabled = hasLoadedImage && !IsBusy;
-            DeleteCommand.Enabled = hasLoadedImage && (hasSelection || hasTreeSelection) && !IsBusy;
+            DeleteCommand.Enabled = hasLoadedImage && canDelete && !IsBusy;
             ExtractCommand.Enabled = hasLoadedImage && (hasSelection || hasTreeSelection) && !IsBusy;
             FormatCommand.Enabled = hasLoadedImage && !IsBusy;
             EditCommand.Enabled = hasLoadedImage &&

@@ -52,6 +52,37 @@ namespace NetImage.Views
             _searchTimer.Tick += (_, _) => _searchBuffer = string.Empty;
         }
 
+        private void OnTreeViewPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var treeViewItem = FindAncestor<TreeViewItem>((DependencyObject)e.OriginalSource);
+            if (treeViewItem?.DataContext is TreeItem item)
+            {
+                item.IsSelected = true;
+                if (DataContext is MainViewModel vm)
+                {
+                    vm.SelectedItem = item;
+                }
+            }
+        }
+
+        private void OnListViewPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var listViewItem = FindAncestor<ListViewItem>((DependencyObject)e.OriginalSource);
+            if (listViewItem?.DataContext is TreeItem item)
+            {
+                if (!MainListView.SelectedItems.Contains(item))
+                {
+                    MainListView.SelectedItem = item;
+                }
+                if (DataContext is MainViewModel vm)
+                {
+                    vm.SelectedItem = item;
+                    vm.SelectedItems.Clear();
+                    vm.SelectedItems.Add(item);
+                }
+            }
+        }
+
         #region Drag and Drop
 
         private const double DragPopupCursorOffsetX = 16;
