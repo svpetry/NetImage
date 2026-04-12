@@ -665,7 +665,8 @@ namespace NetImage.Views
                           $"Files: {e.FileCount}\n" +
                           $"Folders: {e.FolderCount}";
 
-            MessageBox.Show(message, "Folder Size", MessageBoxButton.OK, MessageBoxImage.Information);
+            var dialog = new InfoDialog(message, "Folder Size") { Owner = this };
+            dialog.ShowDialog();
         }
 
         private static string FormatSizeDisplay(long bytes)

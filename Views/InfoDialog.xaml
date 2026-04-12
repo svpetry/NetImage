@@ -1,0 +1,26 @@
+<Window x:Class="NetImage.Views.InfoDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Folder Size" Height="200" Width="320"
+        Icon="pack://application:,,,/NetImage;component/diskette.ico"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        SizeToContent="Height">
+    <Grid Margin="15">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <Image Grid.Column="0" Width="32" Height="32" Margin="0,0,15,0"
+               VerticalAlignment="Top"
+               Source="{Binding InfoIcon}"/>
+
+        <StackPanel Grid.Column="1">
+            <TextBlock x:Name="MessageText" TextWrapping="Wrap" Margin="0,0,0,15"/>
+            <Button Content="OK" Width="75" HorizontalAlignment="Right" IsDefault="True" IsCancel="True"
+                    Click="OkButton_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
