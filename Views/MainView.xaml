@@ -174,12 +174,13 @@
                                             </Style>
                                         </MenuItem.Style>
                                     </MenuItem>
-                                    <MenuItem Header="Size" Command="{Binding Data.SizeCommand, Source={StaticResource ViewModelProxy}}"/>
                                     <Separator Visibility="{Binding Path, Converter={StaticResource IsEmptyStringToVisibilityConverter}}"/>
                                     <MenuItem Header="Format" Command="{Binding Data.FormatCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding Path, Converter={StaticResource IsEmptyStringToVisibilityConverter}}"/>
                                     <MenuItem Header="Bootsector" Command="{Binding Data.BootSectorCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding Path, Converter={StaticResource IsEmptyStringToVisibilityConverter}}"/>
                                     <MenuItem Header="Partitions" Command="{Binding Data.PartitionsCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding Path, Converter={StaticResource IsEmptyStringToVisibilityConverter}}"/>
                                     <MenuItem Header="Image Map" Command="{Binding Data.ImageMapCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding Path, Converter={StaticResource IsEmptyStringToVisibilityConverter}}"/>
+                                    <Separator />
+                                    <MenuItem Header="Info" Command="{Binding Data.SizeCommand, Source={StaticResource ViewModelProxy}}"/>
                                 </ContextMenu>
                             </Setter.Value>
                         </Setter>
@@ -225,8 +226,9 @@
                                     <MenuItem Header="Edit" Command="{Binding Data.EditCommand, Source={StaticResource ViewModelProxy}}"/>
                                     <MenuItem Header="Rename" Command="{Binding Data.RenameCommand, Source={StaticResource ViewModelProxy}}"/>
                                     <MenuItem Header="Extract" Command="{Binding Data.ExtractCommand, Source={StaticResource ViewModelProxy}}"/>
-                                    <MenuItem Header="Size" Command="{Binding Data.SizeCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding IsFolder, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                     <MenuItem Header="Delete" Command="{Binding Data.DeleteCommand, Source={StaticResource ViewModelProxy}}"/>
+                                    <Separator Visibility="{Binding IsFolder, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                    <MenuItem Header="Info" Command="{Binding Data.SizeCommand, Source={StaticResource ViewModelProxy}}" Visibility="{Binding IsFolder, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                 </ContextMenu>
                             </Setter.Value>
                         </Setter>
