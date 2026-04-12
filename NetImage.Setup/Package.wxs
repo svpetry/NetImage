@@ -1,5 +1,5 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
-  <Package Name="NetImage" Manufacturer="svpet" Version="1.4.0.0" UpgradeCode="8ca8db73-c40d-4bd9-93e8-8b9a957dace7" Scope="perMachine">
+  <Package Name="NetImage" Manufacturer="svpet" Version="1.5.0.0" UpgradeCode="8ca8db73-c40d-4bd9-93e8-8b9a957dace7" Scope="perMachine">
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     
     <MediaTemplate EmbedCab="yes" />
