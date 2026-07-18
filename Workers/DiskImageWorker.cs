@@ -16,6 +16,7 @@ namespace NetImage.Workers
         private bool _isLoaded;
         private uint _partitionStartSector;
         private FatType? _fatType;
+        private uint _nextFreeCluster = 2;
 
         public event EventHandler? LoadingStarted;
         public event EventHandler? LoadingCompleted;
@@ -409,14 +410,25 @@ namespace NetImage.Workers
             if (clustersNeeded == 0)
                 return freeClusters;
 
-            for (uint cluster = 2; cluster < bpb.ClusterCount + 2; cluster++)
+            var clusterLimit = bpb.ClusterCount + 2;
+            var startCluster = _nextFreeCluster >= 2 && _nextFreeCluster < clusterLimit
+                ? _nextFreeCluster
+                : 2;
+
+            for (uint checkedCount = 0, cluster = startCluster; checkedCount < bpb.ClusterCount; checkedCount++, cluster++)
             {
+                if (cluster >= clusterLimit)
+                    cluster = 2;
+
                 if (GetFatEntry(cluster, bpb) != 0)
                     continue;
 
                 freeClusters.Add(cluster);
                 if (freeClusters.Count == clustersNeeded)
+                {
+                    _nextFreeCluster = cluster + 1 < clusterLimit ? cluster + 1 : 2;
                     break;
+                }
             }
 
             return freeClusters;
@@ -440,6 +452,7 @@ namespace NetImage.Workers
             foreach (var cluster in clusters)
             {
                 SetFatEntry(cluster, 0, bpb);
+                _nextFreeCluster = Math.Min(_nextFreeCluster, cluster);
             }
         }
 
@@ -1185,6 +1198,11 @@ namespace NetImage.Workers
             if (!TryResolveDirectory(targetDirectory, bpb, out var currentDirectory))
                 throw new InvalidOperationException($"Directory '{targetDirectory}' not found on the disk image.");
 
+            CreateFolderInternal(currentDirectory, folderName, bpb);
+        }
+
+        private DirectoryLocation CreateFolderInternal(DirectoryLocation currentDirectory, string folderName, Bpb bpb)
+        {
             // Allocate 1 cluster for the directory
             var firstCluster = AllocateClusterChain(1, bpb);
             try
@@ -1201,6 +1219,7 @@ namespace NetImage.Workers
 
                 // Create the directory entry in the parent directory
                 CreateDirectoryEntry(currentDirectory, folderName, 0, firstCluster, true, bpb);
+                return newFolderDirectory;
             }
             catch
             {
@@ -1348,6 +1367,11 @@ namespace NetImage.Workers
             if (!TryResolveDirectory(targetDirectory, bpb, out var currentDirectory))
                 throw new InvalidOperationException($"Directory '{targetDirectory}' not found on the disk image.");
 
+            AddFileInternal(currentDirectory, fileName, content, bpb);
+        }
+
+        private void AddFileInternal(DirectoryLocation currentDirectory, string fileName, byte[] content, Bpb bpb)
+        {
             uint firstCluster = 0;
             try
             {
@@ -1374,7 +1398,7 @@ namespace NetImage.Workers
             if (_imageData == null || !_isLoaded)
                 throw new InvalidOperationException("Image must be opened before adding folders.");
 
-            AddHostDirectoryRecursive(targetDirectory, hostFolderPath, null);
+            AddHostDirectoryInternal(targetDirectory, hostFolderPath, null);
             ParseFatFilesystem();
         }
 
@@ -1385,30 +1409,37 @@ namespace NetImage.Workers
                     throw new InvalidOperationException("Image must be opened before adding folders.");
 
                 var progressTracker = new OperationProgressTracker(hostFolderPath, totalBytes, progress);
-                AddHostDirectoryRecursive(targetDirectory, hostFolderPath, progressTracker);
+                AddHostDirectoryInternal(targetDirectory, hostFolderPath, progressTracker);
                 ParseFatFilesystem();
                 progressTracker.ReportCompleted();
             });
 
-        private void AddHostDirectoryRecursive(string targetDirectory, string hostFolderPath, OperationProgressTracker? progressTracker)
+        private void AddHostDirectoryInternal(string targetDirectory, string hostFolderPath, OperationProgressTracker? progressTracker)
+        {
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData!, (int)partitionByteOffset, 512));
+            if (!TryResolveDirectory(targetDirectory, bpb, out var targetLocation))
+                throw new InvalidOperationException($"Directory '{targetDirectory}' not found on the disk image.");
+
+            AddHostDirectoryRecursive(targetLocation, hostFolderPath, progressTracker, bpb);
+        }
+
+        private void AddHostDirectoryRecursive(DirectoryLocation targetDirectory, string hostFolderPath, OperationProgressTracker? progressTracker, Bpb bpb)
         {
             var dirInfo = new DirectoryInfo(hostFolderPath);
-
-            CreateFolderInternal(targetDirectory, dirInfo.Name);
-
-            var newTargetDir = string.IsNullOrEmpty(targetDirectory) ? dirInfo.Name : $"{targetDirectory}\\{dirInfo.Name}";
+            var newTargetDirectory = CreateFolderInternal(targetDirectory, dirInfo.Name, bpb);
 
             foreach (var file in dirInfo.GetFiles())
             {
                 progressTracker?.ReportCurrent(file.FullName);
                 var content = File.ReadAllBytes(file.FullName);
-                AddFileInternal(newTargetDir, file.Name, content);
+                AddFileInternal(newTargetDirectory, file.Name, content, bpb);
                 progressTracker?.Advance(file.Length, file.FullName);
             }
 
             foreach (var subDir in dirInfo.GetDirectories())
             {
-                AddHostDirectoryRecursive(newTargetDir, subDir.FullName, progressTracker);
+                AddHostDirectoryRecursive(newTargetDirectory, subDir.FullName, progressTracker, bpb);
             }
         }
 
@@ -1570,18 +1601,9 @@ namespace NetImage.Workers
                 if (sectorStart + clusterSize > _imageData!.Length)
                     throw new InvalidOperationException("Cluster chain points outside the image bounds.");
 
-                var sectorsPerCluster = bpb.SectorsPerCluster;
-                for (uint s = 0; s < sectorsPerCluster; s++)
-                {
-                    if (offset >= content.Length)
-                        break;
-
-                    var byteOffset = sectorStart + (int)(s * bpb.BytesPerSector);
-                    for (int b = 0; b < bpb.BytesPerSector && offset < content.Length; b++)
-                    {
-                        _imageData![byteOffset + b] = content[offset++];
-                    }
-                }
+                var bytesToCopy = Math.Min(clusterSize, content.Length - offset);
+                Buffer.BlockCopy(content, offset, _imageData, sectorStart, bytesToCopy);
+                offset += bytesToCopy;
 
                 if (offset >= content.Length)
                     break;
@@ -2260,6 +2282,7 @@ namespace NetImage.Workers
             foreach (var cluster in EnumerateClusterChain(firstCluster, bpb).ToList())
             {
                 SetFatEntry(cluster, 0, bpb);
+                _nextFreeCluster = Math.Min(_nextFreeCluster, cluster);
             }
         }
 
