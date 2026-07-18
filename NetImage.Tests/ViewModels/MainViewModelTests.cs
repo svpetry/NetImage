@@ -90,6 +90,25 @@ namespace NetImage.Tests.ViewModels
             });
         }
 
+        [Test]
+        public void PerformRename_WithUnchangedName_DoesNothing()
+        {
+            var worker = CreateWorkerWithNestedFolder();
+            var viewModel = CreateViewModel(worker);
+            var item = new TreeItem("DOCS", "DOCS");
+            string? error = null;
+            viewModel.RenameError += (_, message) => error = message;
+
+            viewModel.PerformRename(item, item.Name);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(error, Is.Null);
+                Assert.That(viewModel.HasUnsavedChanges, Is.False);
+                Assert.That(worker.FilesAndFolders.Select(entry => entry.Path), Does.Contain("DOCS"));
+            });
+        }
+
         private static MainViewModel CreateViewModel(DiskImageWorker worker)
         {
             var viewModel = new MainViewModel();

@@ -1156,6 +1156,9 @@ namespace NetImage.ViewModels
             if (_imageWorker == null)
                 return;
 
+            if (newName == item.Name)
+                return;
+
             try
             {
                 // Check if renaming the root node (empty path) - this changes the volume label

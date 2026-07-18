@@ -4,6 +4,8 @@ namespace NetImage.Views
 {
     public partial class RenameDialog : Window
     {
+        private string _originalName = string.Empty;
+
         public string NewName { get; private set; } = string.Empty;
 
         public RenameDialog()
@@ -14,6 +16,7 @@ namespace NetImage.Views
 
         public void SetItemInfo(string currentName, bool isFolder, bool isVolume = false)
         {
+            _originalName = currentName;
             NameTextBox.Text = currentName;
             if (isVolume)
                 PromptTextBlock.Text = "Enter new volume label:";
@@ -24,6 +27,13 @@ namespace NetImage.Views
         private void OkButton_Click(object sender, RoutedEventArgs e)
         {
             NewName = NameTextBox.Text.Trim();
+            if (NewName == _originalName)
+            {
+                DialogResult = false;
+                Close();
+                return;
+            }
+
             DialogResult = true;
             Close();
         }
