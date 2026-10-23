@@ -3132,6 +3132,183 @@ namespace NetImage.Tests.Workers
 
         #endregion
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ExtractFolder_WithMissingBoundary_CreatesRootAndExtractsFiles(bool emptyImage)
+        {
+            var worker = new DiskImageWorker(string.Empty);
+            worker.CreateBlankImage(1_474_560);
+            var content = new byte[] { 1, 2, 3 };
+            if (!emptyImage)
+                worker.AddFile("ROOT.TXT", content);
+            var destination = Path.Combine(_tempDirectory!, "missing", "extract");
+
+            worker.ExtractFolder(string.Empty, destination, destination);
+
+            Assert.That(Directory.Exists(destination), Is.True);
+            if (!emptyImage)
+                Assert.That(File.ReadAllBytes(Path.Combine(destination, "ROOT.TXT")), Is.EqualTo(content));
+        }
+
+        [Test]
+        public void ExtractFolder_WithJunctionBoundary_RejectsRootWithoutChangingTarget()
+        {
+            var outside = Path.Combine(_tempDirectory!, "outside");
+            Directory.CreateDirectory(outside);
+            var destination = Path.Combine(_tempDirectory!, "extract");
+            CreateJunctionOrIgnore(destination, outside);
+            var outsideFile = Path.Combine(outside, "KEEP.TXT");
+            File.WriteAllText(outsideFile, "original");
+            var worker = new DiskImageWorker(string.Empty);
+            worker.CreateBlankImage(1_474_560);
+            worker.AddFile("KEEP.TXT", Encoding.ASCII.GetBytes("changed"));
+
+            Assert.Throws<IOException>(() => worker.ExtractFolder(string.Empty, destination, destination));
+
+            Assert.That(File.ReadAllText(outsideFile), Is.EqualTo("original"));
+        }
+
+        [Test]
+        public async Task RenameEntry_WithMappedCharacters_PreservesBothNamesAndContents()
+        {
+            var imagePath = Path.Combine(_tempDirectory!, "rename-mapped.img");
+            var worker = new DiskImageWorker(string.Empty);
+            worker.CreateBlankImage(1_474_560);
+            worker.AddFile("FOO+1.TXT", new byte[] { 1 });
+            worker.AddFile("BAR_2.TXT", new byte[] { 2 });
+
+            worker.RenameEntry("FOO+1.TXT", "BAR+2.TXT");
+            await worker.SaveAsync(imagePath);
+            var reopened = new DiskImageWorker(imagePath);
+            await reopened.OpenAsync();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reopened.GetFileContent("BAR+2.TXT"), Is.EqualTo(new byte[] { 1 }));
+                Assert.That(reopened.GetFileContent("BAR_2.TXT"), Is.EqualTo(new byte[] { 2 }));
+                Assert.That(reopened.GetFileContent("FOO+1.TXT"), Is.Null);
+            });
+        }
+
+        [Test]
+        public async Task RenameEntry_WhenMappedNameRequiresMoreSlots_RejectsWithoutChangingSource()
+        {
+            var imagePath = Path.Combine(_tempDirectory!, "rename-mapped-rejected.img");
+            var worker = new DiskImageWorker(string.Empty);
+            worker.CreateBlankImage(1_474_560);
+            worker.AddFile("OLD.TXT", new byte[] { 1 });
+
+            Assert.Throws<IOException>(() => worker.RenameEntry("OLD.TXT", "NEW+1.TXT"));
+            await worker.SaveAsync(imagePath);
+            var reopened = new DiskImageWorker(imagePath);
+            await reopened.OpenAsync();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reopened.GetFileContent("OLD.TXT"), Is.EqualTo(new byte[] { 1 }));
+                Assert.That(reopened.GetFileContent("NEW+1.TXT"), Is.Null);
+                Assert.That(reopened.GetFileContent("NEW_1.TXT"), Is.Null);
+            });
+        }
+
+        [Test]
+        public async Task AddFile_WithShortUnicodeAliasCollision_UsesAliasesWithoutEmbeddedPadding()
+        {
+            var imagePath = Path.Combine(_tempDirectory!, "short-unicode-alias.img");
+            var worker = new DiskImageWorker(string.Empty);
+            worker.CreateBlankImage(1_474_560);
+            worker.AddFile("\u4E2D.txt", new byte[] { 1 });
+            worker.AddFile("\u4F2D.txt", new byte[] { 2 });
+
+            var aliases = ReadRootDirectoryShortNames(worker.GetImageData()!);
+            Assert.That(aliases, Is.EqualTo(new[] { "_.TXT", "_~1.TXT" }));
+            await worker.SaveAsync(imagePath);
+            var reopened = new DiskImageWorker(imagePath);
+            await reopened.OpenAsync();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reopened.GetFileContent("\u4E2D.txt"), Is.EqualTo(new byte[] { 1 }));
+                Assert.That(reopened.GetFileContent("\u4F2D.txt"), Is.EqualTo(new byte[] { 2 }));
+            });
+        }
+
+        [TestCase(false, "NEW.TXT")]
+        [TestCase(false, "lower.txt")]
+        [TestCase(true, "NEW.TXT")]
+        [TestCase(true, "lower.txt")]
+        public async Task AddFile_AtEndMarker_IgnoresStaleEntriesAndPreservesTermination(bool subdirectory, string newName)
+        {
+            var imagePath = Path.Combine(_tempDirectory!, "stale-directory-data.img");
+            var worker = new DiskImageWorker(string.Empty);
+            worker.CreateBlankImage(1_474_560);
+            var directory = subdirectory ? "DOCS" : string.Empty;
+            if (subdirectory)
+                worker.CreateFolder(string.Empty, directory);
+            worker.AddFile(directory, "KEEP.TXT", new byte[] { 1 });
+            worker.AddFile(directory, "OLD.TXT", Array.Empty<byte>());
+            worker.AddFile(directory, "STALE.TXT", Array.Empty<byte>());
+            var image = worker.GetImageData()!;
+            var entryStart = subdirectory
+                ? GetFat12ClusterLayout(image, FindRootDirectoryEntryCluster(image, "DOCS")).ClusterOffset + 64
+                : (BitConverter.ToUInt16(image, 14) + image[16] * BitConverter.ToUInt16(image, 22)) * SectorSize;
+            // Bytes after a terminal 0x00 are unspecified, even if they resemble live entries.
+            image[entryStart + 32] = 0x00;
+            await File.WriteAllBytesAsync(imagePath, image);
+            var reopened = new DiskImageWorker(imagePath);
+            await reopened.OpenAsync();
+
+            reopened.AddFile(directory, newName, new byte[] { 2 });
+            await reopened.SaveAsync(imagePath);
+            var verify = new DiskImageWorker(imagePath);
+            await verify.OpenAsync();
+            var prefix = subdirectory ? "DOCS\\" : string.Empty;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(verify.GetFileContent(prefix + "KEEP.TXT"), Is.EqualTo(new byte[] { 1 }));
+                Assert.That(verify.GetFileContent(prefix + newName), Is.EqualTo(new byte[] { 2 }));
+                Assert.That(verify.FilesAndFolders.Select(entry => entry.Path), Does.Not.Contain(prefix + "STALE.TXT"));
+            });
+        }
+
+        [Test]
+        public void ExtractFolder_WithJunctionAboveBoundary_RejectsWithoutCreatingOutsideDirectory()
+        {
+            var outside = Path.Combine(_tempDirectory!, "outside");
+            Directory.CreateDirectory(outside);
+            var link = Path.Combine(_tempDirectory!, "LINK");
+            CreateJunctionOrIgnore(link, outside);
+            var boundary = Path.Combine(link, "extract");
+            var worker = new DiskImageWorker(string.Empty);
+            worker.CreateBlankImage(1_474_560);
+
+            Assert.Throws<IOException>(() => worker.ExtractFolder(string.Empty, boundary, boundary));
+
+            Assert.That(Directory.Exists(Path.Combine(outside, "extract")), Is.False);
+        }
+
+        [Test]
+        public void TryWriteFileWithinRoot_WithHardLinkTarget_LeavesOutsideFileUnchanged()
+        {
+            var boundary = Path.Combine(_tempDirectory!, "extract");
+            Directory.CreateDirectory(boundary);
+            var outsideFile = Path.Combine(_tempDirectory!, "outside.txt");
+            File.WriteAllText(outsideFile, "original");
+            var target = Path.Combine(boundary, "KEEP.TXT");
+            if (RunCmd($"/c mklink /H \"{target}\" \"{outsideFile}\"") != 0)
+                Assert.Ignore("Unable to create a hard link in this environment.");
+
+            var written = DiskImageWorker.TryWriteFileWithinRoot(boundary, "KEEP.TXT", Encoding.ASCII.GetBytes("changed"));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(written, Is.False);
+                Assert.That(File.ReadAllText(outsideFile), Is.EqualTo("original"));
+                Assert.That(File.ReadAllText(target), Is.EqualTo("original"));
+            });
+        }
+
         #region Hard-Disk FAT Type Consistency (Follow-up Issue #5)
 
         [TestCase(64u, 4u, 63u, DiskImageWorker.FatType.Fat12)]

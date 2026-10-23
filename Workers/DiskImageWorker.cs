@@ -994,6 +994,12 @@ namespace NetImage.Workers
             return (fileName.Length + LFN_CHARS_PER_ENTRY - 1) / LFN_CHARS_PER_ENTRY;
         }
 
+        private static int GetRequiredLfnEntryCount(string fileName, string shortName)
+            => NeedsLfNEntry(fileName) ||
+               !string.Equals(ShortPaddedToDisplay(shortName), fileName, StringComparison.OrdinalIgnoreCase)
+                ? GetLfnEntryCount(fileName)
+                : 0;
+
         /// <summary>
         /// Encodes a filename into the ASCII 8.3 short-alias form written to disk: each character is upper-cased and
         /// mapped to a representable FAT character (anything illegal or non-ASCII becomes '_'), so the produced alias
@@ -1090,7 +1096,8 @@ namespace NetImage.Workers
             if (maxBaseLength < 1)
                 throw new IOException("Too many short-name collisions in this directory to generate a unique 8.3 alias.");
 
-            var basePart = namePartPadded.Substring(0, Math.Min(maxBaseLength, namePartPadded.Length));
+            var namePart = namePartPadded.TrimEnd(' ');
+            var basePart = namePart.Substring(0, Math.Min(maxBaseLength, namePart.Length));
             return (basePart + tail).PadRight(8, ' ') + extPartPadded;
         }
 
@@ -1936,21 +1943,22 @@ namespace NetImage.Workers
         }
 
         /// <summary>
-        /// Scans a directory for the first run of <paramref name="count"/> consecutive free entry slots (empty 0x00 or
-        /// deleted 0xE5), following the directory's real cluster chain so a run may straddle a cluster boundary. Any
-        /// other slot - a live short entry or an LFN fragment - terminates the current run. On success the offsets of
-        /// the run are returned in <paramref name="runOffsets"/> as the real, chain-resolved entry positions.
+        /// Finds consecutive deleted slots or unused slots at/after the terminal 0x00, following the directory's
+        /// actual cluster chain. Live entries before that terminal marker end the free run; bytes after it are stale.
         /// </summary>
         private bool TryFindContiguousFreeEntryRun(DirectoryLocation directory, int count, Bpb bpb, out List<int> runOffsets)
         {
             var imageData = _imageData!;
             var run = new List<int>(count);
+            var pastEnd = false;
 
             foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
             {
                 var firstByte = imageData[offset];
+                pastEnd |= firstByte == 0x00;
 
-                if (firstByte == 0x00 || firstByte == 0xE5)
+                // All slots after the terminal marker are unused, regardless of their stale bytes.
+                if (pastEnd || firstByte == 0xE5)
                 {
                     run.Add(offset);
                     if (run.Count == count)
@@ -1982,27 +1990,16 @@ namespace NetImage.Workers
         }
 
         /// <summary>
-        /// Normalises the slot immediately after <paramref name="lastEntryOffset"/> following an insertion. A free (0x00)
-        /// slot is already a valid end-of-directory marker. A deleted (0xE5) slot is a skippable hole that live entries
-        /// may follow, so it must be preserved - converting it to 0x00 would turn it into a premature end marker and
-        /// hide every live entry after it. A live entry needs no marker at all. In every case there is therefore no
-        /// marker to (re)write, which keeps pre-existing entries reachable.
+        /// Finds the new terminal slot only when an insertion consumes the old end marker. Insertions into deleted
+        /// holes leave the existing terminator alone so live entries after those holes remain visible.
         /// </summary>
-        private void EnsureEndOfDirectoryMarker(DirectoryLocation directory, int lastEntryOffset, Bpb bpb)
+        private int GetNewEndMarkerOffset(DirectoryLocation directory, IReadOnlyList<int> runOffsets, Bpb bpb)
         {
-            var imageData = _imageData!;
-            var index = GetDirectoryEntryIndex(directory, lastEntryOffset, bpb);
-            if (index < 0)
-                return;
+            if (!runOffsets.Any(offset => _imageData![offset] == 0x00))
+                return -1;
 
-            var nextOffset = GetDirectoryEntryOffset(directory, index + 1, bpb);
-            if (nextOffset < 0)
-                return;
-
-            // Only a genuinely free slot is an end marker, and it already is one; a deleted slot is left untouched so
-            // the live entries that follow it stay reachable. Nothing is ever written here.
-            if (imageData[nextOffset] == 0x00)
-                imageData[nextOffset] = 0x00;
+            var index = GetDirectoryEntryIndex(directory, runOffsets[^1], bpb);
+            return index < 0 ? -1 : GetDirectoryEntryOffset(directory, index + 1, bpb);
         }
 
         /// <summary>
@@ -2073,9 +2070,7 @@ namespace NetImage.Workers
             // the original (a collision forced a "~n" tail on an otherwise-valid 8.3 name, or a character had to be
             // mapped away) - in that case the LFN is the only place the original name can be preserved, so it must be
             // written even when the name itself is 8.3-legal.
-            bool needsLfN = NeedsLfNEntry(fileName) ||
-                            !string.Equals(ShortPaddedToDisplay(shortName), fileName, StringComparison.OrdinalIgnoreCase);
-            int lfnEntriesNeeded = needsLfN ? GetLfnEntryCount(fileName) : 0;
+            int lfnEntriesNeeded = GetRequiredLfnEntryCount(fileName, shortName);
             int totalEntriesNeeded = lfnEntriesNeeded + 1;
 
             // Allocate the entry chain transactionally. The free run may straddle the directory's existing cluster
@@ -2108,9 +2103,11 @@ namespace NetImage.Workers
                     appendedClusters.Add(ExpandDirectory(directory, bpb));
                 }
 
-                // Snapshot the slots we are about to overwrite so a failure restores the directory byte-for-byte.
-                originalBytes = new Dictionary<int, byte[]>(runOffsets.Count);
-                foreach (var offset in runOffsets)
+                // Snapshot both the entry chain and the new terminator before changing any directory bytes.
+                var endMarkerOffset = GetNewEndMarkerOffset(directory, runOffsets, bpb);
+                originalBytes = new Dictionary<int, byte[]>(runOffsets.Count + 1);
+                var changedOffsets = endMarkerOffset < 0 ? runOffsets : runOffsets.Append(endMarkerOffset);
+                foreach (var offset in changedOffsets)
                 {
                     var saved = new byte[32];
                     Array.Copy(_imageData!, offset, saved, 0, 32);
@@ -2118,7 +2115,8 @@ namespace NetImage.Workers
                 }
 
                 WriteEntryChain(runOffsets, fileName, shortName, fileSize, firstCluster, isDirectory, lfnEntriesNeeded);
-                EnsureEndOfDirectoryMarker(directory, runOffsets[^1], bpb);
+                if (endMarkerOffset >= 0)
+                    _imageData![endMarkerOffset] = 0x00;
             }
             catch
             {
@@ -2656,18 +2654,16 @@ namespace NetImage.Workers
                     var lfnOffsets = GetLfNEntryOffsets(directory, offset, bpb);
                     int lfnCount = lfnOffsets.Count;
 
-                    // Calculate new LFN requirements
-                    int newLfnCount = NeedsLfNEntry(newName) ? GetLfnEntryCount(newName) : 0;
+                    // Calculate the final alias before deciding how many LFN slots preserve the requested name.
+                    var takenShortNames = CollectShortNames(directory, bpb);
+                    takenShortNames.Remove(entryName);
+                    var newShortName = GenerateUniqueShortName(newName, takenShortNames);
+                    int newLfnCount = GetRequiredLfnEntryCount(newName, newShortName);
 
                     if (newLfnCount != lfnCount)
                     {
                         throw new IOException($"Renaming '{oldName}' to '{newName}' would change the number of directory entries required. This operation is not supported. Delete and re-create the entry instead.");
                     }
-
-                    // Reuse this entry's own short-name slot so the renamed entry gets a collision-free alias.
-                    var takenShortNames = CollectShortNames(directory, bpb);
-                    takenShortNames.Remove(entryName);
-                    var newShortName = GenerateUniqueShortName(newName, takenShortNames);
 
                     if (newLfnCount > 0)
                     {
