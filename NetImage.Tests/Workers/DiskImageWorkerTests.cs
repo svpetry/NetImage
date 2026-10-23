@@ -1703,13 +1703,15 @@ namespace NetImage.Tests.Workers
             worker.CreateFolder("EXPORT", "SUB");
             worker.AddFile("EXPORT\\SUB", "INNER.TXT", nestedContent);
 
-            var destinationPath = Path.Combine(_tempDirectory!, "EXTRACTED", "EXPORT");
+            var boundaryPath = Path.Combine(_tempDirectory!, "EXTRACTED");
+            var destinationPath = Path.Combine(boundaryPath, "EXPORT");
             var totalBytes = rootContent.Length + nestedContent.Length;
             var progressUpdates = new List<OperationProgress>();
 
             // Act
             await worker.ExtractFolderAsync(
                 "EXPORT",
+                boundaryPath,
                 destinationPath,
                 new InlineProgress<OperationProgress>(progressUpdates.Add));
 
@@ -1740,7 +1742,7 @@ namespace NetImage.Tests.Workers
             var destination = Path.Combine(_tempDirectory!, "extract");
 
             // Act
-            evil.ExtractFolder(string.Empty, destination);
+            evil.ExtractFolder(string.Empty, destination, destination);
 
             // Assert - nothing may be created outside the chosen destination folder
             Assert.That(Directory.Exists(Path.Combine(_tempDirectory!, "evil")), Is.False);
@@ -2598,7 +2600,7 @@ namespace NetImage.Tests.Workers
             await evil.OpenAsync();
 
             // Act
-            evil.ExtractFolder(string.Empty, extract);
+            evil.ExtractFolder(string.Empty, extract, extract);
 
             // Assert - the file living outside the chosen destination is byte-for-byte unchanged.
             Assert.That(File.ReadAllBytes(outsideFile), Is.EqualTo(Encoding.ASCII.GetBytes("original")));
@@ -2628,10 +2630,82 @@ namespace NetImage.Tests.Workers
             await evil.OpenAsync();
 
             // Act
-            evil.ExtractFolder(string.Empty, extract);
+            evil.ExtractFolder(string.Empty, extract, extract);
 
             // Assert - the linked target outside the destination keeps its original bytes.
             Assert.That(File.ReadAllBytes(outsideFile), Is.EqualTo(Encoding.ASCII.GetBytes("original")));
+        }
+
+        [Test]
+        public async Task ExtractFolder_SelectedFolderThroughJunctionRoot_DoesNotOverwriteOutsideFile()
+        {
+            // Arrange - mirrors the ViewModel's selected-folder call: the image folder name is combined with the chosen
+            // destination and the result (extract\LINK) is used as the extraction root. LINK is a junction into outside\.
+            var outside = Path.Combine(_tempDirectory!, "outside");
+            var extract = Path.Combine(_tempDirectory!, "extract");
+            Directory.CreateDirectory(outside);
+            Directory.CreateDirectory(extract);
+
+            var outsideFile = Path.Combine(outside, "KEEP.TXT");
+            File.WriteAllBytes(outsideFile, Encoding.ASCII.GetBytes("original"));
+
+            CreateJunctionOrIgnore(Path.Combine(extract, "LINK"), outside);
+
+            var filePath = Path.Combine(_tempDirectory!, "junction-root.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "LINK");
+            worker.AddFile("LINK", "KEEP.TXT", Encoding.ASCII.GetBytes("changed"));
+            await worker.SaveAsync(filePath);
+
+            var evil = new DiskImageWorker(filePath);
+            await evil.OpenAsync();
+
+            // Act - the exact call the ViewModel makes for a selected folder: source "LINK", boundary "extract",
+            // root "extract\LINK". Before the fix this promoted the junction to a trusted root and overwrote the
+            // outside file; now the unsafe root is rejected before anything is written.
+            Assert.Throws<IOException>(() => evil.ExtractFolder("LINK", extract, Path.Combine(extract, "LINK")));
+
+            // Assert - the file living outside the chosen destination is byte-for-byte unchanged.
+            Assert.That(File.ReadAllBytes(outsideFile), Is.EqualTo(Encoding.ASCII.GetBytes("original")));
+        }
+
+        [Test]
+        public async Task ExtractFolder_MixedSelectionWithFolderThroughJunction_KeepsOutsideFileIntact()
+        {
+            // Arrange - a mixed selection (folder + top-level file) with the folder's root promoted through a junction.
+            var outside = Path.Combine(_tempDirectory!, "outside");
+            var extract = Path.Combine(_tempDirectory!, "extract");
+            Directory.CreateDirectory(outside);
+            Directory.CreateDirectory(extract);
+
+            var outsideFile = Path.Combine(outside, "KEEP.TXT");
+            File.WriteAllBytes(outsideFile, Encoding.ASCII.GetBytes("original"));
+
+            CreateJunctionOrIgnore(Path.Combine(extract, "LINK"), outside);
+
+            var filePath = Path.Combine(_tempDirectory!, "mixed.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "LINK");
+            worker.AddFile("LINK", "KEEP.TXT", Encoding.ASCII.GetBytes("changed"));
+            worker.AddFile("TOP.TXT", Encoding.ASCII.GetBytes("top"));
+            await worker.SaveAsync(filePath);
+
+            var evil = new DiskImageWorker(filePath);
+            await evil.OpenAsync();
+
+            // Act - file part of the mixed selection writes directly under the boundary; folder part hits the junction root.
+            var topContent = evil.GetFileContent("TOP.TXT")!;
+            Assert.That(DiskImageWorker.TryWriteFileWithinRoot(extract, "TOP.TXT", topContent), Is.True);
+            Assert.Throws<IOException>(() => evil.ExtractFolder("LINK", extract, Path.Combine(extract, "LINK")));
+
+            // Assert - the top-level file landed inside the destination and the outside file is untouched.
+            Assert.Multiple(() =>
+            {
+                Assert.That(File.ReadAllBytes(Path.Combine(extract, "TOP.TXT")), Is.EqualTo(topContent));
+                Assert.That(File.ReadAllBytes(outsideFile), Is.EqualTo(Encoding.ASCII.GetBytes("original")));
+            });
         }
 
         private static void CreateJunctionOrIgnore(string linkPath, string targetDirectory)
@@ -2800,6 +2874,98 @@ namespace NetImage.Tests.Workers
 
         #endregion
 
+        #region Deleted Slot End-Marker Regression (Verification Finding 2)
+
+        [Test]
+        public async Task AddFile_AfterConsecutiveDeletedSlots_PreservesLiveEntries()
+        {
+            var filePath = Path.Combine(_tempDirectory!, "deleted-slots-root.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.AddFile("A.TXT", new byte[] { 1 });
+            worker.AddFile("B.TXT", new byte[] { 2 });
+            worker.AddFile("KEEP.TXT", new byte[] { 3 });
+            worker.DeleteEntry("A.TXT");
+            worker.DeleteEntry("B.TXT");
+
+            worker.AddFile("NEW.TXT", new byte[] { 4 });
+            await worker.SaveAsync(filePath);
+
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain("NEW.TXT"));
+                Assert.That(paths, Does.Contain("KEEP.TXT"), "a live entry after a deleted slot must stay reachable");
+                Assert.That(reopened.GetFileContent("NEW.TXT"), Is.EqualTo(new byte[] { 4 }));
+                Assert.That(reopened.GetFileContent("KEEP.TXT"), Is.EqualTo(new byte[] { 3 }));
+            });
+        }
+
+        [Test]
+        public async Task CreateFolder_AfterConsecutiveDeletedSlots_PreservesLiveEntries()
+        {
+            var filePath = Path.Combine(_tempDirectory!, "deleted-slots-folder.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.AddFile("A.TXT", new byte[] { 1 });
+            worker.AddFile("B.TXT", new byte[] { 2 });
+            worker.AddFile("KEEP.TXT", new byte[] { 3 });
+            worker.DeleteEntry("A.TXT");
+            worker.DeleteEntry("B.TXT");
+
+            worker.CreateFolder(string.Empty, "NEWDIR");
+            await worker.SaveAsync(filePath);
+
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain("NEWDIR"));
+                Assert.That(paths, Does.Contain("KEEP.TXT"));
+                Assert.That(reopened.GetFileContent("KEEP.TXT"), Is.EqualTo(new byte[] { 3 }));
+            });
+        }
+
+        [Test]
+        public async Task MoveEntry_IntoDirectoryWithDeletedSlots_PreservesLiveEntries()
+        {
+            var filePath = Path.Combine(_tempDirectory!, "deleted-slots-move.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "DOCS");
+            worker.AddFile("DOCS", "A.TXT", new byte[] { 1 });
+            worker.AddFile("DOCS", "B.TXT", new byte[] { 2 });
+            worker.AddFile("DOCS", "KEEP.TXT", new byte[] { 3 });
+            worker.DeleteEntry(@"DOCS\A.TXT");
+            worker.DeleteEntry(@"DOCS\B.TXT");
+
+            var incoming = new byte[] { 4 };
+            worker.AddFile("INCOMING.TXT", incoming);
+
+            worker.MoveEntry("INCOMING.TXT", "DOCS");
+            await worker.SaveAsync(filePath);
+
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain(@"DOCS\INCOMING.TXT"));
+                Assert.That(paths, Does.Contain(@"DOCS\KEEP.TXT"), "KEEP after deleted slots must stay reachable");
+                Assert.That(reopened.GetFileContent(@"DOCS\INCOMING.TXT"), Is.EqualTo(incoming));
+                Assert.That(reopened.GetFileContent(@"DOCS\KEEP.TXT"), Is.EqualTo(new byte[] { 3 }));
+                Assert.That(paths, Does.Not.Contain("INCOMING.TXT"));
+            });
+        }
+
+        #endregion
+
         #region Unicode Short-Name Aliases (Follow-up Issue #4)
 
         [Test]
@@ -2857,6 +3023,110 @@ namespace NetImage.Tests.Workers
                 Assert.That(verifyPaths, Does.Contain(renamedName));
                 Assert.That(verifyPaths, Does.Not.Contain(twoName));
                 Assert.That(verify.GetFileContent(renamedName), Is.EqualTo(twoContent));
+            });
+        }
+
+        [Test]
+        public async Task AddFile_WithLiteralTildeName_RoundTripsAsShortName()
+        {
+            var filePath = Path.Combine(_tempDirectory!, "tilde.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            var content = new byte[] { 9, 8, 7 };
+
+            worker.AddFile("FOO~1.TXT", content);
+            await worker.SaveAsync(filePath);
+
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain("FOO~1.TXT"));
+                Assert.That(paths, Does.Not.Contain("FOO_1.TXT"));
+                Assert.That(reopened.GetFileContent("FOO~1.TXT"), Is.EqualTo(content));
+            });
+        }
+
+        [Test]
+        public async Task AddFile_WithSpecialCharInValid83Name_PreservesOriginalViaLfN()
+        {
+            // Arrange - a name that is 8.3-legal for NeedsLfNEntry but contains '+' which MapToFatChar replaces with
+            // '_'; the short name therefore differs from the original and an LFN must be written to preserve it.
+            var filePath = Path.Combine(_tempDirectory!, "tilde-special.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            var content = new byte[] { 3, 3 };
+
+            // Act
+            worker.AddFile("FOO+1.TXT", content);
+            await worker.SaveAsync(filePath);
+
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain("FOO+1.TXT"));
+                Assert.That(paths, Does.Not.Contain("FOO_1.TXT"));
+                Assert.That(reopened.GetFileContent("FOO+1.TXT"), Is.EqualTo(content));
+            });
+        }
+
+        [Test]
+        public async Task RenameEntry_WithTildeName_RoundTrips()
+        {
+            var filePath = Path.Combine(_tempDirectory!, "tilde-rename.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            var content = new byte[] { 5 };
+
+            worker.AddFile("BAR~2.TXT", content);
+            await worker.SaveAsync(filePath);
+
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            reopened.RenameEntry("BAR~2.TXT", "BAZ~3.TXT");
+            await reopened.SaveAsync(filePath);
+
+            var verify = new DiskImageWorker(filePath);
+            await verify.OpenAsync();
+            var paths = verify.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain("BAZ~3.TXT"));
+                Assert.That(paths, Does.Not.Contain("BAR~2.TXT"));
+                Assert.That(verify.GetFileContent("BAZ~3.TXT"), Is.EqualTo(content));
+            });
+        }
+
+        [Test]
+        public async Task MoveEntry_WithSpecialCharInValid83Name_PreservesOriginal()
+        {
+            // Arrange - same 8.3-legal-but-mapped case exercised through move instead of add.
+            var filePath = Path.Combine(_tempDirectory!, "tilde-move-special.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "DOCS");
+            var content = new byte[] { 4, 4 };
+            worker.AddFile("FOO+1.TXT", content);
+
+            // Act
+            worker.MoveEntry("FOO+1.TXT", "DOCS");
+            await worker.SaveAsync(filePath);
+
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain(@"DOCS\FOO+1.TXT"));
+                Assert.That(paths, Does.Not.Contain("FOO+1.TXT"));
+                Assert.That(reopened.GetFileContent(@"DOCS\FOO+1.TXT"), Is.EqualTo(content));
             });
         }
 

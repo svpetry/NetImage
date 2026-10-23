@@ -938,7 +938,7 @@ namespace NetImage.ViewModels
                                         continue;
                                     var folderSize = CalculateFolderSize(item.Path);
                                     totalBytes += folderSize;
-                                    await worker.ExtractFolderAsync(item.Path, destFullPath, CreateProgressReporter("Extracting..."));
+                                    await worker.ExtractFolderAsync(item.Path, destPath, destFullPath, CreateProgressReporter("Extracting..."));
                                 }
                                 else
                                 {
@@ -986,7 +986,7 @@ namespace NetImage.ViewModels
 
                             await RunBusyOperationAsync(
                                 "Extracting folder...",
-                                () => worker.ExtractFolderAsync(item.Path, destPath, CreateProgressReporter("Extracting folder...")),
+                                () => worker.ExtractFolderAsync(item.Path, folderDialog.FolderName, destPath, CreateProgressReporter("Extracting folder...")),
                                 progressText: item.Name);
                         }
                     }

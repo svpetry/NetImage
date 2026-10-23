@@ -987,12 +987,10 @@ namespace NetImage.Workers
         }
 
         /// <summary>
-        /// Gets the number of LFN entries needed for a filename.
+        /// Computes the number of LFN entries required to store <paramref name="fileName"/> (assuming one is needed).
         /// </summary>
         private static int GetLfnEntryCount(string fileName)
         {
-            if (!NeedsLfNEntry(fileName))
-                return 0;
             return (fileName.Length + LFN_CHARS_PER_ENTRY - 1) / LFN_CHARS_PER_ENTRY;
         }
 
@@ -1049,7 +1047,7 @@ namespace NetImage.Workers
                 return c;
             if (c is >= 'A' and <= 'Z')
                 return c;
-            if ("!#$%&'()-@^_`{}".IndexOf(c) >= 0)
+            if ("!#$%&'()-@^_`{}~".IndexOf(c) >= 0)
                 return c;
 
             return '_';
@@ -1286,18 +1284,32 @@ namespace NetImage.Workers
             return SafeExtraction.TryWriteAllBytesWithinRoot(System.IO.Path.GetFullPath(destinationRoot), fullDestination, content, lastWriteTime);
         }
 
-        public void ExtractFolder(string sourcePath, string hostDestinationPath)
-            => ExtractFolderInternal(sourcePath, hostDestinationPath, null);
+        public void ExtractFolder(string sourcePath, string destinationRoot, string hostDestinationPath)
+            => ExtractFolderInternal(sourcePath, destinationRoot, hostDestinationPath, null);
 
-        public Task ExtractFolderAsync(string sourcePath, string hostDestinationPath, IProgress<OperationProgress>? progress = null)
-            => Task.Run(() => ExtractFolderInternal(sourcePath, hostDestinationPath, progress));
+        public Task ExtractFolderAsync(string sourcePath, string destinationRoot, string hostDestinationPath, IProgress<OperationProgress>? progress = null)
+            => Task.Run(() => ExtractFolderInternal(sourcePath, destinationRoot, hostDestinationPath, progress));
 
-        private void ExtractFolderInternal(string sourcePath, string hostDestinationPath, IProgress<OperationProgress>? progress)
+        private void ExtractFolderInternal(string sourcePath, string destinationRoot, string hostDestinationPath, IProgress<OperationProgress>? progress)
         {
             if (_imageData == null || !_isLoaded)
                 throw new InvalidOperationException("Image must be opened before extracting.");
 
-            System.IO.Directory.CreateDirectory(hostDestinationPath);
+            // The destination the user chose is the containment boundary for the whole extraction. The folder we
+            // actually extract into (hostDestinationPath) is derived from an image folder name, so it must be
+            // validated against that boundary - it can never become a new trusted root on its own, which is what let a
+            // junction under the destination redirect extraction outside of it.
+            var boundaryRoot = Path.GetFullPath(destinationRoot);
+            var resolvedRoot = Path.GetFullPath(hostDestinationPath);
+
+            if (!SafeExtraction.EnsureExtractionRootWithinBoundary(boundaryRoot, resolvedRoot))
+                throw new IOException("The extraction folder is not a safe location inside the selected destination.");
+
+            // Build the image-path prefix from the boundary root to the actual extraction root; this is passed to
+            // the safe helpers so they validate every component (including the root itself) against the boundary.
+            var rootRelativePath = string.Equals(resolvedRoot, boundaryRoot, StringComparison.OrdinalIgnoreCase)
+                ? string.Empty
+                : Path.GetRelativePath(boundaryRoot, resolvedRoot);
 
             var prefix = string.IsNullOrEmpty(sourcePath) ? string.Empty : sourcePath + "\\";
             var entriesToExtract = FilesAndFolders
@@ -1317,9 +1329,15 @@ namespace NetImage.Workers
             {
                 var entry = item.Entry;
 
+                // The relative path from the boundary root to this entry, combining the root prefix and the
+                // image-relative path within the root. This is what the safe helpers expect (not an absolute path).
+                var relativePath = string.IsNullOrEmpty(rootRelativePath)
+                    ? item.RelativePath
+                    : Path.Combine(rootRelativePath, item.RelativePath);
+
                 if (entry.Size == null)
                 {
-                    TryCreateDirectoryWithinRoot(hostDestinationPath, item.RelativePath);
+                    TryCreateDirectoryWithinRoot(boundaryRoot, relativePath);
                     continue;
                 }
 
@@ -1328,7 +1346,7 @@ namespace NetImage.Workers
                 var content = GetFileContent(entry.Path);
                 if (content != null)
                 {
-                    TryWriteFileWithinRoot(hostDestinationPath, item.RelativePath, content, entry.Modified);
+                    TryWriteFileWithinRoot(boundaryRoot, relativePath, content, entry.Modified);
                     extractedBytes += entry.Size ?? 0L;
                 }
 
@@ -1964,9 +1982,11 @@ namespace NetImage.Workers
         }
 
         /// <summary>
-        /// Guarantees a valid end-of-directory marker immediately after <paramref name="lastEntryOffset"/>. When the
-        /// following slot is free (0x00 or 0xE5) it is normalised to a single 0x00 sentinel; when the directory is
-        /// exactly full the caller leaves the chain end as-is (readers stop there).
+        /// Normalises the slot immediately after <paramref name="lastEntryOffset"/> following an insertion. A free (0x00)
+        /// slot is already a valid end-of-directory marker. A deleted (0xE5) slot is a skippable hole that live entries
+        /// may follow, so it must be preserved - converting it to 0x00 would turn it into a premature end marker and
+        /// hide every live entry after it. A live entry needs no marker at all. In every case there is therefore no
+        /// marker to (re)write, which keeps pre-existing entries reachable.
         /// </summary>
         private void EnsureEndOfDirectoryMarker(DirectoryLocation directory, int lastEntryOffset, Bpb bpb)
         {
@@ -1979,8 +1999,9 @@ namespace NetImage.Workers
             if (nextOffset < 0)
                 return;
 
-            var firstByte = imageData[nextOffset];
-            if (firstByte == 0x00 || firstByte == 0xE5)
+            // Only a genuinely free slot is an end marker, and it already is one; a deleted slot is left untouched so
+            // the live entries that follow it stay reachable. Nothing is ever written here.
+            if (imageData[nextOffset] == 0x00)
                 imageData[nextOffset] = 0x00;
         }
 
@@ -2043,14 +2064,19 @@ namespace NetImage.Workers
             // Reject a duplicate name before any directory slot is claimed so a rejected add never mutates the image.
             ThrowIfNameCollision(directory, fileName, bpb);
 
-            // Check if we need LFN entries for this filename
-            int lfnEntriesNeeded = NeedsLfNEntry(fileName) ? GetLfnEntryCount(fileName) : 0;
-            int totalEntriesNeeded = lfnEntriesNeeded + 1;
-
             // Generate a short (8.3) name that is unique within the directory: long names that truncate to the same
             // base share it only while it is free, otherwise a canonical "~n" alias (ABCDEF~1.TXT, ...) is chosen and
             // written into the short entry so every distinct long name round-trips with its own bytes.
             var shortName = GenerateUniqueShortName(fileName, CollectShortNames(directory, bpb));
+
+            // An LFN is required when the name is not a plain 8.3 name, OR when the generated short alias differs from
+            // the original (a collision forced a "~n" tail on an otherwise-valid 8.3 name, or a character had to be
+            // mapped away) - in that case the LFN is the only place the original name can be preserved, so it must be
+            // written even when the name itself is 8.3-legal.
+            bool needsLfN = NeedsLfNEntry(fileName) ||
+                            !string.Equals(ShortPaddedToDisplay(shortName), fileName, StringComparison.OrdinalIgnoreCase);
+            int lfnEntriesNeeded = needsLfN ? GetLfnEntryCount(fileName) : 0;
+            int totalEntriesNeeded = lfnEntriesNeeded + 1;
 
             // Allocate the entry chain transactionally. The free run may straddle the directory's existing cluster
             // boundary and, when the trailing free slots are not enough, grow into freshly appended clusters - the

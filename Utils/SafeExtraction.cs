@@ -36,6 +36,17 @@ namespace NetImage.Utils
         }
 
         /// <summary>
+        /// Validates (and, if missing, creates) the extraction root <paramref name="rootPath"/> so that every path
+        /// component at or below <paramref name="boundaryRoot"/> is a real (non-reparse) directory. Returns true when
+        /// <paramref name="rootPath"/> equals the boundary (nothing to validate) or is a safe subfolder of it; returns
+        /// false when it lies outside the boundary or resolves through a junction/symlink/other reparse point. This is
+        /// what stops an image folder name from being promoted to a new trusted root that points outside the
+        /// destination the user actually chose.
+        /// </summary>
+        public static bool EnsureExtractionRootWithinBoundary(string boundaryRoot, string rootPath)
+            => EnsureDirectoryChain(Path.GetFullPath(boundaryRoot), Path.GetFullPath(rootPath));
+
+        /// <summary>
         /// Writes <paramref name="content"/> to <paramref name="fullPath"/>, first making sure every ancestor at or
         /// below <paramref name="rootFull"/> is a real (non-reparse) directory and that the destination file itself is
         /// not a redirected reparse target. The final file is opened with FILE_FLAG_OPEN_REPARSE_POINT so a reparse
