@@ -38,8 +38,10 @@ namespace NetImage.ViewModels
         private bool _isProgressIndeterminate;
         private double _progressValue;
         private string _progressText = string.Empty;
+        private readonly Func<string?> _promptForSavePath;
 
         public event EventHandler<string>? AddError;
+        public event EventHandler<string>? NewImageError;
 
         public event EventHandler<CreateFolderRequestEventArgs>? CreateFolderRequested;
         public event EventHandler<AboutRequestEventArgs>? AboutRequested;
@@ -79,6 +81,22 @@ namespace NetImage.ViewModels
             SaveCommand = new ActionCommand(ExecuteSave) { Enabled = false };
             SaveAsCommand = new ActionCommand(ExecuteSaveAs) { Enabled = false };
             TreeItems = new ObservableCollection<TreeItem>();
+
+            _promptForSavePath = () =>
+            {
+                var fileName = _imageWorker != null && !string.IsNullOrEmpty(_imageWorker.FilePath)
+                    ? System.IO.Path.GetFileName(_imageWorker.FilePath)
+                    : "newdisk.img";
+
+                var saveFileDialog = new SaveFileDialog
+                {
+                    Title = "Save Disk Image As",
+                    Filter = "Disk Image Files|*.ima;*.img|All Files|*.*",
+                    FileName = fileName
+                };
+
+                return saveFileDialog.ShowDialog() == true ? saveFileDialog.FileName : null;
+            };
 
             System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         }
@@ -316,35 +334,49 @@ namespace NetImage.ViewModels
                 if (!args.AllowClose)
                     return;
 
-                if (args.SaveChanges && !string.IsNullOrEmpty(_imageWorker.FilePath))
-                {
-                    await RunBusyOperationAsync(
-                        "Saving image...",
-                        () => Task.Run(async () => await _imageWorker.SaveAsync(_imageWorker.FilePath)),
-                        progressText: System.IO.Path.GetFileName(_imageWorker.FilePath));
-                    HasUnsavedChanges = false;
-                    StatusText = $"Saved: {_imageWorker.FilePath}";
-                }
+                if (args.SaveChanges && !await SaveCurrentImageBeforeDiscardingAsync())
+                    return;
             }
 
             var dialog = new NewDiskImageDialog();
             if (dialog.ShowDialog() != true || dialog.SelectedSize == 0)
                 return;
 
-            // Create new image worker with blank FAT image
-            _imageWorker = new DiskImageWorker(string.Empty);
+            // Create new image worker with blank FAT image, keeping the previous state so a failed
+            // creation can be rolled back instead of leaving a half-initialized image in place.
+            var previousWorker = _imageWorker;
+            var previousCanSaveCurrentImage = _canSaveCurrentImage;
+            var previousHasUnsavedChanges = _hasUnsavedChanges;
 
-            if (dialog.IsHardDisk)
+            try
             {
-                _imageWorker.CreateHardDiskImage(dialog.Cylinders, dialog.Heads, dialog.SectorsPerTrack, "DISK");
-            }
-            else
-            {
-                _imageWorker.CreateBlankImage(dialog.SelectedSize, "DISK");
-            }
+                _imageWorker = new DiskImageWorker(string.Empty);
 
-            _canSaveCurrentImage = false;
-            _hasUnsavedChanges = false;
+                if (dialog.IsHardDisk)
+                {
+                    _imageWorker.CreateHardDiskImage(dialog.Cylinders, dialog.Heads, dialog.SectorsPerTrack, "DISK");
+                }
+                else
+                {
+                    _imageWorker.CreateBlankImage(dialog.SelectedSize, "DISK");
+                }
+
+                _canSaveCurrentImage = false;
+                _hasUnsavedChanges = false;
+            }
+            catch (Exception ex)
+            {
+                _imageWorker = previousWorker;
+                _canSaveCurrentImage = previousCanSaveCurrentImage;
+                HasUnsavedChanges = previousHasUnsavedChanges;
+
+                BuildTreeView();
+                RefreshDiskSpaceText();
+                UpdateCommandStates();
+
+                NewImageError?.Invoke(this, $"Could not create disk image:\n{ex.Message}");
+                return;
+            }
 
             BuildTreeView();
             RefreshDiskSpaceText();
@@ -371,15 +403,8 @@ namespace NetImage.ViewModels
                 if (!args.AllowClose)
                     return;
 
-                if (args.SaveChanges && !string.IsNullOrEmpty(_imageWorker.FilePath))
-                {
-                    await RunBusyOperationAsync(
-                        "Saving image...",
-                        () => Task.Run(async () => await _imageWorker.SaveAsync(_imageWorker.FilePath)),
-                        progressText: System.IO.Path.GetFileName(_imageWorker.FilePath));
-                    HasUnsavedChanges = false;
-                    StatusText = $"Saved: {_imageWorker.FilePath}";
-                }
+                if (args.SaveChanges && !await SaveCurrentImageBeforeDiscardingAsync())
+                    return;
             }
 
             var openFileDialog = new OpenFileDialog
@@ -606,15 +631,8 @@ namespace NetImage.ViewModels
                 if (!args.AllowClose)
                     return;
 
-                if (args.SaveChanges && !string.IsNullOrEmpty(_imageWorker.FilePath))
-                {
-                    await RunBusyOperationAsync(
-                        "Saving image...",
-                        () => Task.Run(async () => await _imageWorker.SaveAsync(_imageWorker.FilePath)),
-                        progressText: System.IO.Path.GetFileName(_imageWorker.FilePath));
-                    HasUnsavedChanges = false;
-                    StatusText = $"Saved: {_imageWorker.FilePath}";
-                }
+                if (args.SaveChanges && !await SaveCurrentImageBeforeDiscardingAsync())
+                    return;
             }
 
             _imageWorker = null;
@@ -837,7 +855,7 @@ namespace NetImage.ViewModels
 
             // Filter out files already in the target directory
             filesToMove = filesToMove
-                .Where(f => !GetParentFolderPath(f.Path).Equals(targetDirectory, StringComparison.OrdinalIgnoreCase))
+                .Where(f => !string.Equals(GetParentFolderPath(f.Path), targetDirectory, StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
             if (filesToMove.Count == 0)
@@ -915,7 +933,9 @@ namespace NetImage.ViewModels
                             {
                                 if (item.IsFolder)
                                 {
-                                    var destFullPath = System.IO.Path.Combine(destPath, item.Name);
+                                    var destFullPath = DiskImageWorker.ResolveSafeDestinationPath(destPath, item.Name);
+                                    if (destFullPath == null)
+                                        continue;
                                     var folderSize = CalculateFolderSize(item.Path);
                                     totalBytes += folderSize;
                                     await worker.ExtractFolderAsync(item.Path, destFullPath, CreateProgressReporter("Extracting..."));
@@ -925,7 +945,9 @@ namespace NetImage.ViewModels
                                     var content = worker.GetFileContent(item.Path);
                                     if (content != null)
                                     {
-                                        var destFullPath = System.IO.Path.Combine(destPath, item.Name);
+                                        var destFullPath = DiskImageWorker.ResolveSafeDestinationPath(destPath, item.Name);
+                                        if (destFullPath == null)
+                                            continue;
                                         System.IO.File.WriteAllBytes(destFullPath, content);
                                         totalBytes += content.Length;
                                     }
@@ -959,7 +981,10 @@ namespace NetImage.ViewModels
                         {
                             var destPath = isSingleItem && string.IsNullOrEmpty(item.Path)
                                 ? folderDialog.FolderName
-                                : System.IO.Path.Combine(folderDialog.FolderName, item.Name);
+                                : DiskImageWorker.ResolveSafeDestinationPath(folderDialog.FolderName, item.Name);
+
+                            if (destPath == null)
+                                continue;
 
                             await RunBusyOperationAsync(
                                 "Extracting folder...",
@@ -1040,7 +1065,9 @@ namespace NetImage.ViewModels
                                     var content = await Task.Run(() => worker.GetFileContent(item.Path));
                                     if (content != null)
                                     {
-                                        var destFullPath = System.IO.Path.Combine(destPath, item.Name);
+                                        var destFullPath = DiskImageWorker.ResolveSafeDestinationPath(destPath, item.Name);
+                                        if (destFullPath == null)
+                                            continue;
                                         await Task.Run(() => System.IO.File.WriteAllBytes(destFullPath, content));
                                     }
                                 }
@@ -1336,6 +1363,55 @@ namespace NetImage.ViewModels
                 {
                     SaveError?.Invoke(this, $"Could not save image:\n{ex.Message}");
                 }
+            }
+        }
+
+        /// <summary>
+        /// Saves the current image before it is discarded, replaced, or closed.
+        /// For images with a known path this saves in place; for a new (path-less) image it runs a
+        /// Save As prompt. Returns true only when the save succeeded; false means the caller must
+        /// abort so unsaved work is never silently discarded.
+        /// </summary>
+        private async Task<bool> SaveCurrentImageBeforeDiscardingAsync()
+        {
+            if (_imageWorker == null)
+                return false;
+
+            var worker = _imageWorker;
+
+            try
+            {
+                if (!string.IsNullOrEmpty(worker.FilePath))
+                {
+                    await RunBusyOperationAsync(
+                        "Saving image...",
+                        () => Task.Run(async () => await worker.SaveAsync(worker.FilePath)),
+                        progressText: System.IO.Path.GetFileName(worker.FilePath));
+                    HasUnsavedChanges = false;
+                    StatusText = $"Saved: {worker.FilePath}";
+                    return true;
+                }
+
+                var targetPath = _promptForSavePath();
+                if (string.IsNullOrEmpty(targetPath))
+                    return false;
+
+                await RunBusyOperationAsync(
+                    "Saving image...",
+                    () => Task.Run(async () => await worker.SaveAsync(targetPath)),
+                    progressText: System.IO.Path.GetFileName(targetPath));
+
+                worker.FilePath = targetPath;
+                _canSaveCurrentImage = true;
+                HasUnsavedChanges = false;
+                UpdateCommandStates();
+                StatusText = $"Saved as: {targetPath}";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                SaveError?.Invoke(this, $"Could not save image:\n{ex.Message}");
+                return false;
             }
         }
 

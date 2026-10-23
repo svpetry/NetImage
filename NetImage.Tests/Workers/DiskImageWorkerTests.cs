@@ -132,9 +132,10 @@ namespace NetImage.Tests.Workers
 
             var worker = new DiskImageWorker(filePath);
 
-            // Act & Assert - Should not throw
+            // Act & Assert - Should not throw. An invalid boot sector is rejected, so the
+            // worker stays unloaded; opening it must still not crash.
             await worker.OpenAsync();
-            Assert.That(worker.IsLoaded, Is.True);
+            Assert.That(worker.IsLoaded, Is.False);
             Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Is.Empty);
         }
 
@@ -231,6 +232,41 @@ namespace NetImage.Tests.Workers
             Assert.That(image[fat2Offset], Is.EqualTo(0xF8));
             Assert.That(image[fat2Offset + 1], Is.EqualTo(0xFF));
             Assert.That(image[fat2Offset + 2], Is.EqualTo(0xFF));
+        }
+
+        [Test]
+        public async Task CreateBlankImage_WithTwoPointEightEightMegabyteSize_CreatesValidFat12Image()
+        {
+            // Arrange: the corrected 2.88 MB floppy size is sector-aligned (2949120 % 512 == 0)
+            const long imageSize = 2949120;
+            Assert.That(imageSize % SectorSize, Is.EqualTo(0));
+
+            var filePath = Path.Combine(_tempDirectory!, "fat288.img");
+            var worker = new DiskImageWorker(filePath);
+
+            // Act - must not throw for the corrected, sector-aligned size
+            worker.CreateBlankImage(imageSize, "DISK");
+
+            // Assert (in-memory)
+            Assert.That(worker.IsLoaded, Is.True);
+            Assert.That(worker.FilesystemType, Is.EqualTo(DiskImageWorker.FatType.Fat12));
+            Assert.That(worker.VolumeLabel, Is.EqualTo("DISK"));
+
+            await worker.SaveAsync(filePath);
+
+            // Assert (reload from disk proves the image is a valid, loadable FAT12 volume)
+            var reloaded = new DiskImageWorker(filePath);
+            await reloaded.OpenAsync();
+
+            Assert.That(reloaded.IsLoaded, Is.True);
+            Assert.That(reloaded.FilesystemType, Is.EqualTo(DiskImageWorker.FatType.Fat12));
+            Assert.That(reloaded.GetTotalBytes(), Is.GreaterThan(0));
+            Assert.That(reloaded.GetFreeBytes(), Is.EqualTo(reloaded.GetTotalBytes()));
+
+            var image = await File.ReadAllBytesAsync(filePath);
+            Assert.That(image.Length, Is.EqualTo(imageSize));
+            Assert.That(image[510], Is.EqualTo(0x55));
+            Assert.That(image[511], Is.EqualTo(0xAA));
         }
 
         #endregion
@@ -1665,6 +1701,57 @@ namespace NetImage.Tests.Workers
             Assert.That(progressUpdates.Any(update => update.CurrentItem == Path.Combine("SUB", "INNER.TXT")), Is.True);
         }
 
+        [Test]
+        public async Task ExtractFolder_WithTraversalPathEntry_DoesNotWriteOutsideDestination()
+        {
+            // Arrange - craft an image containing a folder entry whose name escapes the image root
+            var filePath = Path.Combine(_tempDirectory!, "traversal.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1474560, "DISK");
+            worker.CreateFolder(string.Empty, @"..\evil");
+            await worker.SaveAsync(filePath);
+
+            var evil = new DiskImageWorker(filePath);
+            await evil.OpenAsync();
+            Assert.That(evil.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain(@"..\evil"));
+
+            var destination = Path.Combine(_tempDirectory!, "extract");
+
+            // Act
+            evil.ExtractFolder(string.Empty, destination);
+
+            // Assert - nothing may be created outside the chosen destination folder
+            Assert.That(Directory.Exists(Path.Combine(_tempDirectory!, "evil")), Is.False);
+            // The neutralized entry lands inside the destination instead
+            Assert.That(Directory.Exists(Path.Combine(destination, "evil")), Is.True);
+        }
+
+        [Test]
+        public void ResolveSafeDestinationPath_NeutralizesTraversalAndRootedSegments()
+        {
+            var root = Path.Combine(_tempDirectory!, "dest");
+
+            Assert.That(
+                DiskImageWorker.ResolveSafeDestinationPath(root, @"..\evil.txt"),
+                Is.EqualTo(Path.Combine(root, "evil.txt")));
+            Assert.That(
+                DiskImageWorker.ResolveSafeDestinationPath(root, @"..\..\..\evil.txt"),
+                Is.EqualTo(Path.Combine(root, "evil.txt")));
+            Assert.That(
+                DiskImageWorker.ResolveSafeDestinationPath(root, @"sub\..\nested\..\ok.txt"),
+                Is.EqualTo(Path.Combine(root, "sub", "nested", "ok.txt")));
+
+            // Rooted segments are stripped so the result stays inside the destination
+            Assert.That(
+                DiskImageWorker.ResolveSafeDestinationPath(root, @"C:\Windows\evil.dll"),
+                Is.EqualTo(Path.Combine(root, "Windows", "evil.dll")));
+
+            // Paths that collapse onto (or above) the root after sanitization are rejected
+            Assert.That(DiskImageWorker.ResolveSafeDestinationPath(root, @"..\.."), Is.Null);
+            Assert.That(DiskImageWorker.ResolveSafeDestinationPath(root, "."), Is.Null);
+            Assert.That(DiskImageWorker.ResolveSafeDestinationPath(root, ""), Is.Null);
+        }
+
         #region UpdateFile Tests
 
         [Test]
@@ -1805,6 +1892,657 @@ namespace NetImage.Tests.Workers
             Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain("TOP\\SUB"));
             Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain("TOP\\SUB\\FILE.BIN"));
             Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBytesBefore));
+        }
+
+        #endregion
+
+        #region New Image FAT Geometry (Issue #2)
+
+        [Test]
+        public async Task CreateBlankImage_StandardFloppy_HasCanonicalFat12Geometry()
+        {
+            // Arrange
+            var filePath = Path.Combine(_tempDirectory!, "floppy-geometry.img");
+            var worker = new DiskImageWorker(filePath);
+
+            // Act
+            worker.CreateBlankImage(1_474_560, "DISK");
+            await worker.SaveAsync(filePath);
+
+            // Assert - the on-image BPB matches the canonical 1.44 MB FAT12 layout
+            var image = await File.ReadAllBytesAsync(filePath);
+            var bytesPerSector = BitConverter.ToUInt16(image, 11);
+            var sectorsPerCluster = image[13];
+            var reservedSectors = BitConverter.ToUInt16(image, 14);
+            var numFats = image[16];
+            var rootDirEntries = BitConverter.ToUInt16(image, 17);
+            var sectorsPerFat = BitConverter.ToUInt16(image, 22);
+
+            Assert.That(bytesPerSector, Is.EqualTo(512));
+            Assert.That(sectorsPerCluster, Is.EqualTo(1));
+            Assert.That(reservedSectors, Is.EqualTo(1));
+            Assert.That(numFats, Is.EqualTo(2));
+            Assert.That(rootDirEntries, Is.EqualTo(224));
+            Assert.That(sectorsPerFat, Is.EqualTo(9));
+
+            var totalSectors = image.LongLength / SectorSize;
+            var rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
+            Assert.That(rootDirSectors, Is.EqualTo(14));
+
+            var dataStartSector = (uint)(reservedSectors + (numFats * sectorsPerFat) + rootDirSectors);
+            var dataClusters = (totalSectors - dataStartSector) / sectorsPerCluster;
+            Assert.That(totalSectors, Is.EqualTo(2880));
+            Assert.That(dataClusters, Is.EqualTo(2847));
+
+            // A FAT must hold entries for every data cluster plus the two reserved entries.
+            var requiredFatBytes = ((dataClusters + 2) * 3 + 1) / 2; // 1.5 bytes/entry rounded up
+            Assert.That((long)sectorsPerFat * bytesPerSector, Is.GreaterThanOrEqualTo(requiredFatBytes));
+
+            // Re-open through the public API to confirm the worker reads the same cluster count back.
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            Assert.That(reopened.FilesystemType, Is.EqualTo(DiskImageWorker.FatType.Fat12));
+            Assert.That(reopened.GetTotalBytes(), Is.EqualTo(dataClusters * bytesPerSector * sectorsPerCluster));
+        }
+
+        [Test]
+        public async Task CreateBlankImage_LargeFileBeyondOldFatBoundary_RoundTripsWithoutCorruptingRootDirectory()
+        {
+            // Arrange - a ~1.4 MB file on a 1.44 MB floppy used to need FAT entries past the old undersized FAT
+            var filePath = Path.Combine(_tempDirectory!, "floppy-overflow.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+
+            var bigContent = new byte[1_400_000];
+            for (var i = 0; i < bigContent.Length; i++)
+            {
+                bigContent[i] = (byte)(i % 251);
+            }
+
+            var smallContent = Encoding.ASCII.GetBytes("SMALL");
+
+            // Act
+            worker.AddFile("SMALL.TXT", smallContent);
+            worker.AddFile("BIGFILE.BIN", bigContent);
+            await worker.SaveAsync(filePath);
+
+            // Assert - the root directory still parses and both files round-trip intact.
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.That(paths, Does.Contain("SMALL.TXT"));
+            Assert.That(paths, Does.Contain("BIGFILE.BIN"));
+            Assert.That(reopened.GetFileContent("SMALL.TXT"), Is.EqualTo(smallContent));
+            Assert.That(reopened.GetFileContent("BIGFILE.BIN"), Is.EqualTo(bigContent));
+        }
+
+        [Test]
+        public void CreateHardDiskImage_Fat16Geometry_HasFatLargeEnoughForAllClusters()
+        {
+            // Arrange / Act - canonical FAT16 sizing case (1024 x 4 x 63)
+            var worker = new DiskImageWorker("fat16-geometry.img");
+            worker.CreateHardDiskImage(1024, 4, 63, "DISK");
+
+            Assert.That(worker.FilesystemType, Is.EqualTo(DiskImageWorker.FatType.Fat16));
+            var imageData = worker.GetImageData();
+            Assert.That(imageData, Is.Not.Null);
+            var image = imageData!;
+
+            // The FAT16 boot sector lives in the first partition (sector 63).
+            const int boot = 63 * SectorSize;
+            var bytesPerSector = BitConverter.ToUInt16(image, boot + 11);
+            var sectorsPerCluster = image[boot + 13];
+            var reservedSectors = BitConverter.ToUInt16(image, boot + 14);
+            var numFats = image[boot + 16];
+            var rootDirEntries = BitConverter.ToUInt16(image, boot + 17);
+            var sectorsPerFat = BitConverter.ToUInt16(image, boot + 22);
+            var partitionSectors = BitConverter.ToUInt32(image, boot + 32);
+
+            var rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
+            var dataStartSector = (uint)(reservedSectors + (numFats * sectorsPerFat) + rootDirSectors);
+            var dataClusters = (long)((partitionSectors - dataStartSector) / sectorsPerCluster);
+
+            // Must be in the FAT16 cluster range and each FAT copy must cover (dataClusters + 2) * 2 bytes.
+            Assert.That(dataClusters, Is.GreaterThanOrEqualTo(4085));
+            Assert.That(dataClusters, Is.LessThan(65525));
+
+            var requiredFatBytes = (dataClusters + 2) * 2; // 2 bytes/entry for FAT16
+            Assert.That((long)sectorsPerFat * bytesPerSector, Is.GreaterThanOrEqualTo(requiredFatBytes));
+
+            // The old 1.5-bytes/entry sizing under-allocated this FAT to 12288 bytes; the fix must be larger.
+            Assert.That((long)sectorsPerFat * bytesPerSector, Is.GreaterThan(12288));
+        }
+
+        #endregion
+
+        #region FAT16 Reserved Entries (Issue #7)
+
+        private static ushort ReadFat16Entry(byte[] image, int fatBase, uint cluster)
+            => BitConverter.ToUInt16(image, fatBase + (int)(cluster * 2));
+
+        // Asserts the two reserved FAT16 entries and the free data-cluster-2 in every FAT copy.
+        private static void AssertFat16ReservedEntriesCorrect(byte[] image, uint partitionStart)
+        {
+            var boot = (int)partitionStart * SectorSize;
+            var bytesPerSector = BitConverter.ToUInt16(image, boot + 11);
+            var reservedSectors = BitConverter.ToUInt16(image, boot + 14);
+            byte numFats = image[boot + 16];
+            var sectorsPerFat = BitConverter.ToUInt16(image, boot + 22);
+            var media = image[boot + 21];
+
+            Assert.That(bytesPerSector, Is.EqualTo(SectorSize));
+            Assert.That(numFats, Is.GreaterThanOrEqualTo((byte)1));
+
+            for (var fat = 0; fat < numFats; fat++)
+            {
+                var fatBase = (int)((partitionStart + reservedSectors + (uint)(fat * sectorsPerFat)) * bytesPerSector);
+                var entry0 = ReadFat16Entry(image, fatBase, 0);
+                var entry1 = ReadFat16Entry(image, fatBase, 1);
+                var entry2 = ReadFat16Entry(image, fatBase, 2);
+
+                Assert.That((byte)(entry0 & 0xFF), Is.EqualTo(media), $"FAT{fat} entry[0] low byte must be the media descriptor");
+                Assert.That((byte)(entry0 >> 8), Is.EqualTo(0xFF), $"FAT{fat} entry[0] high byte must be 0xFF");
+                Assert.That(entry1, Is.EqualTo((ushort)0xFFFF), $"FAT{fat} entry[1] must be end-of-chain 0xFFFF");
+                Assert.That(entry2, Is.EqualTo((ushort)0x0000), $"FAT{fat} entry[2] (data cluster 2) must be free");
+            }
+        }
+
+        [Test]
+        public async Task CreateHardDiskImage_Fat16_WritesCorrectReservedEntriesAndLeavesCluster2Free()
+        {
+            // Arrange / Act
+            var filePath = Path.Combine(_tempDirectory!, "fat16-create.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateHardDiskImage(128, 4, 63, "DISK");
+            Assert.That(worker.FilesystemType, Is.EqualTo(DiskImageWorker.FatType.Fat16));
+            await worker.SaveAsync(filePath);
+
+            // Assert - both FAT copies on disk have correct reserved entries and free cluster 2
+            var image = await File.ReadAllBytesAsync(filePath);
+            AssertFat16ReservedEntriesCorrect(image, worker.GetPartitionStartSector());
+        }
+
+        [Test]
+        public void FormatImage_Fat16_WritesCorrectReservedEntriesAndLeavesCluster2Free()
+        {
+            // Arrange - allocate cluster 2 first so format must clear it back to free
+            var worker = new DiskImageWorker("fat16-format.img");
+            worker.CreateHardDiskImage(128, 4, 63, "DISK");
+            worker.AddFile("OLD.TXT", new byte[] { 0x01, 0x02 });
+
+            // Act
+            worker.FormatImage();
+
+            // Assert
+            Assert.That(worker.FilesystemType, Is.EqualTo(DiskImageWorker.FatType.Fat16));
+            var image = worker.GetImageData()!;
+            AssertFat16ReservedEntriesCorrect(image, worker.GetPartitionStartSector());
+        }
+
+        [Test]
+        public async Task AddFile_OnFreshFat16Image_AllocatesCluster2First()
+        {
+            // Arrange / Act
+            var filePath = Path.Combine(_tempDirectory!, "fat16-alloc.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateHardDiskImage(128, 4, 63, "DISK");
+            Assert.That(worker.FilesystemType, Is.EqualTo(DiskImageWorker.FatType.Fat16));
+
+            // A fresh image must report its full capacity free (no orphan allocation at cluster 2).
+            Assert.That(worker.GetFreeBytes(), Is.EqualTo(worker.GetTotalBytes()));
+
+            worker.AddFile("A.TXT", new byte[] { 0x42 });
+
+            var image = worker.GetImageData()!;
+            var partitionStart = worker.GetPartitionStartSector();
+            var boot = (int)partitionStart * SectorSize;
+            var bytesPerSector = BitConverter.ToUInt16(image, boot + 11);
+            var reservedSectors = BitConverter.ToUInt16(image, boot + 14);
+            var sectorsPerFat = BitConverter.ToUInt16(image, boot + 22);
+            var fatBase = (int)((partitionStart + reservedSectors) * bytesPerSector);
+            var fatSize = sectorsPerFat * bytesPerSector;
+
+            // Cluster 2 is now the (single-cluster) chain end-of-chain in BOTH FAT copies, cluster 3 untouched.
+            Assert.That(ReadFat16Entry(image, fatBase, 2), Is.EqualTo((ushort)0xFFFF));
+            Assert.That(ReadFat16Entry(image, fatBase + fatSize, 2), Is.EqualTo((ushort)0xFFFF));
+            Assert.That(ReadFat16Entry(image, fatBase, 3), Is.EqualTo((ushort)0x0000));
+
+            var clusterSize = bytesPerSector * image[boot + 13];
+            Assert.That(worker.GetFreeBytes(), Is.EqualTo(worker.GetTotalBytes() - clusterSize));
+
+            // Round-trip through save/reopen.
+            await worker.SaveAsync(filePath);
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            Assert.That(reopened.FilesAndFolders.Select(f => f.Path), Does.Contain("A.TXT"));
+            Assert.That(reopened.GetFileContent("A.TXT"), Is.EqualTo(new byte[] { 0x42 }));
+        }
+
+        #endregion
+
+        #region Cluster-Chain-Aware Directory Entries (Issue #3)
+
+        [Test]
+        public async Task AddFile_IntoDirectoryWithFreeEntriesAcrossClusterBoundary_WritesEntriesWithoutClobberingFileData()
+        {
+            // Arrange - the 1.44 MB FAT12 floppy uses 512-byte clusters, so a subdirectory holds 16 entries per cluster
+            var filePath = Path.Combine(_tempDirectory!, "fragmented-directory.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+
+            var blockContent = new byte[512];
+            for (var i = 0; i < blockContent.Length; i++)
+            {
+                // The high bit is always set so no BLOCK.BIN byte can be mistaken for an LFN attribute byte.
+                blockContent[i] = (byte)((i % 251) | 0x80);
+            }
+
+            // Act - DOCS claims the first data cluster and BLOCK.BIN immediately takes the following one, so the
+            // next cluster the DOCS directory grows into can never be physically contiguous with its first cluster.
+            worker.CreateFolder(string.Empty, "DOCS");
+            worker.AddFile("BLOCK.BIN", blockContent);
+
+            for (var i = 0; i < 15; i++)
+            {
+                worker.AddFile("DOCS", $"F{i:D2}.TXT", Array.Empty<byte>());
+            }
+
+            var image = worker.GetImageData();
+            Assert.That(image, Is.Not.Null);
+            var directoryClusters = ReadFat12ClusterChain(image!, FindRootDirectoryEntryCluster(image!, "DOCS"));
+            Assert.That(directoryClusters, Has.Count.EqualTo(2), "DOCS should have grown into a second cluster.");
+            Assert.That(directoryClusters[1], Is.Not.EqualTo(directoryClusters[0] + 1),
+                "the second DOCS cluster must not be physically contiguous with the first.");
+
+            // Deleting F13 (last slot of the first directory cluster) and F14 (first slot of the second one) leaves a
+            // two-entry free run that straddles the directory cluster boundary.
+            worker.DeleteEntry("DOCS\\F13.TXT");
+            worker.DeleteEntry("DOCS\\F14.TXT");
+
+            image = worker.GetImageData();
+            Assert.That(image, Is.Not.Null);
+            var deletedImage = image!;
+            var firstClusterLayout = GetFat12ClusterLayout(deletedImage, directoryClusters[0]);
+            var secondClusterLayout = GetFat12ClusterLayout(deletedImage, directoryClusters[1]);
+            Assert.That(deletedImage[firstClusterLayout.ClusterOffset + firstClusterLayout.ClusterSize - 32], Is.EqualTo(0xE5));
+            Assert.That(deletedImage[secondClusterLayout.ClusterOffset], Is.EqualTo(0xE5));
+
+            var lowerContent = Encoding.ASCII.GetBytes("payload stored in lower.txt");
+
+            // Act - "lower.txt" needs one LFN entry plus its short name entry, which land in different clusters.
+            worker.AddFile("DOCS", "lower.txt", lowerContent);
+            await worker.SaveAsync(filePath);
+
+            // Assert - reopening sees exactly one lower.txt entry with its content ...
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain("DOCS\\lower.txt"));
+                Assert.That(paths.Count(p => Path.GetFileName(p).Equals("lower.txt", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(1));
+                Assert.That(reopened.GetFileContent("DOCS\\lower.txt"), Is.EqualTo(lowerContent));
+
+                // ... and BLOCK.BIN survived because the entry was written to its real directory offsets.
+                Assert.That(paths, Does.Contain("BLOCK.BIN"));
+                Assert.That(reopened.GetFileContent("BLOCK.BIN"), Is.EqualTo(blockContent));
+            });
+        }
+
+        /// <summary>
+        /// Reads a FAT12 chain starting at the given cluster (raw FAT image, no MBR).
+        /// </summary>
+        private static List<uint> ReadFat12ClusterChain(byte[] image, uint firstCluster)
+        {
+            var fatStart = BitConverter.ToUInt16(image, 14) * SectorSize;
+            var clusters = new List<uint>();
+            var cluster = firstCluster;
+
+            while (cluster >= 2 && cluster < 0xFF8)
+            {
+                clusters.Add(cluster);
+                var entryOffset = fatStart + (int)(cluster * 3 / 2);
+                var raw = (ushort)(image[entryOffset] | (image[entryOffset + 1] << 8));
+                cluster = cluster % 2 == 0 ? (uint)(raw & 0x0FFF) : (uint)(raw >> 4);
+            }
+
+            return clusters;
+        }
+
+        /// <summary>
+        /// Returns the byte offset and size of a FAT12 cluster in a raw (non-partitioned) image.
+        /// </summary>
+        private static (int ClusterOffset, int ClusterSize) GetFat12ClusterLayout(byte[] image, uint cluster)
+        {
+            var bytesPerSector = (int)BitConverter.ToUInt16(image, 11);
+            var sectorsPerCluster = (int)image[13];
+            var reservedSectors = (int)BitConverter.ToUInt16(image, 14);
+            var numFats = (int)image[16];
+            var rootDirEntries = (int)BitConverter.ToUInt16(image, 17);
+            var sectorsPerFat = (int)BitConverter.ToUInt16(image, 22);
+            var rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
+            var dataStartSector = reservedSectors + (numFats * sectorsPerFat) + rootDirSectors;
+
+            return ((dataStartSector + (((int)cluster - 2) * sectorsPerCluster)) * bytesPerSector,
+                sectorsPerCluster * bytesPerSector);
+        }
+
+        /// <summary>
+        /// Finds the first cluster of a named root directory entry in a raw (non-partitioned) image.
+        /// </summary>
+        private static uint FindRootDirectoryEntryCluster(byte[] image, string name)
+        {
+            var bytesPerSector = (int)BitConverter.ToUInt16(image, 11);
+            var reservedSectors = (int)BitConverter.ToUInt16(image, 14);
+            var numFats = (int)image[16];
+            var rootDirEntries = (int)BitConverter.ToUInt16(image, 17);
+            var sectorsPerFat = (int)BitConverter.ToUInt16(image, 22);
+            var paddedName = name.PadRight(11);
+
+            var offset = (reservedSectors + (numFats * sectorsPerFat)) * bytesPerSector;
+            for (var i = 0; i < rootDirEntries; i++, offset += 32)
+            {
+                if (Encoding.ASCII.GetString(image, offset, 11) == paddedName)
+                {
+                    return BitConverter.ToUInt16(image, offset + 26);
+                }
+            }
+
+            throw new InvalidOperationException($"Root directory entry '{name}' was not found.");
+        }
+
+        #endregion
+
+        #region Atomic Move (Issue #4)
+
+        [Test]
+        public async Task MoveEntry_WithFullTargetDirectory_ThrowsAndKeepsSourceIntact()
+        {
+            // Arrange - pack the root directory of a 160 KB FAT12 floppy completely full, then keep a
+            // multi-cluster KEEP.TXT inside DOCS so a move into the full root has nowhere to write.
+            var filePath = Path.Combine(_tempDirectory!, "full-target-move.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(163_840, "DISK");
+
+            var keepContent = Enumerable.Range(0, 600).Select(i => (byte)(i % 251)).ToArray();
+            worker.CreateFolder(string.Empty, "DOCS");
+            worker.AddFile("DOCS", "KEEP.TXT", keepContent);
+
+            // Fill every remaining root slot: 224 entries - volume label - DOCS.
+            for (var i = 0; i < 222; i++)
+            {
+                worker.AddFile(string.Empty, $"FILL{i:D3}.BIN", new byte[] { 0x01 });
+            }
+
+            var freeBytesBefore = worker.GetFreeBytes();
+
+            // Act / Assert - the move must fail ...
+            var exception = Assert.Throws<InvalidOperationException>(() => worker.MoveEntry(@"DOCS\KEEP.TXT", string.Empty));
+            Assert.That(exception!.Message, Does.Contain("No free directory entries"));
+
+            // ... and leave the source untouched: still listed, still readable with identical content.
+            Assert.Multiple(() =>
+            {
+                Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain(@"DOCS\KEEP.TXT"));
+                Assert.That(worker.GetFileContent(@"DOCS\KEEP.TXT"), Is.EqualTo(keepContent));
+                Assert.That(worker.FilesAndFolders.Select(f => f.Path).ToList(), Does.Not.Contain("KEEP.TXT"));
+                Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBytesBefore));
+            });
+
+            // Persist and re-open to confirm the failed move also left the saved image intact.
+            await worker.SaveAsync(filePath);
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            Assert.Multiple(() =>
+            {
+                Assert.That(reopened.FilesAndFolders.Select(f => f.Path).ToList(), Does.Contain(@"DOCS\KEEP.TXT"));
+                Assert.That(reopened.GetFileContent(@"DOCS\KEEP.TXT"), Is.EqualTo(keepContent));
+            });
+        }
+
+        [Test]
+        public async Task MoveEntry_WithRoomInTarget_MovesFileAndPreservesContent()
+        {
+            // Arrange - a multi-cluster file and an LFN-named file in the root of a 1.44 MB floppy
+            var filePath = Path.Combine(_tempDirectory!, "move-ok.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "DOCS");
+
+            var bigContent = Enumerable.Range(0, 700).Select(i => (byte)(i % 251)).ToArray();
+            var lfnContent = Encoding.ASCII.GetBytes("long name payload");
+            worker.AddFile("BIGKEEP.BIN", bigContent);
+            worker.AddFile("LongKeepName.Txt", lfnContent);
+            var freeBytesBeforeMove = worker.GetFreeBytes();
+
+            // Act
+            worker.MoveEntry("BIGKEEP.BIN", "DOCS");
+            worker.MoveEntry("LongKeepName.Txt", "DOCS");
+
+            // Assert - the in-memory model reflects the moves and reuses the cluster chains
+            var paths = worker.FilesAndFolders.Select(f => f.Path).ToList();
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Not.Contain("BIGKEEP.BIN"));
+                Assert.That(paths, Does.Not.Contain("LongKeepName.Txt"));
+                Assert.That(paths, Does.Contain(@"DOCS\BIGKEEP.BIN"));
+                Assert.That(paths, Does.Contain(@"DOCS\LongKeepName.Txt"));
+                Assert.That(worker.GetFileContent(@"DOCS\BIGKEEP.BIN"), Is.EqualTo(bigContent));
+                Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBytesBeforeMove), "a move must not reallocate clusters");
+            });
+
+            // Save + reopen: the file data and the long name survive the move intact.
+            await worker.SaveAsync(filePath);
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var reopenedPaths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+            Assert.Multiple(() =>
+            {
+                Assert.That(reopenedPaths, Does.Contain(@"DOCS\BIGKEEP.BIN"));
+                Assert.That(reopenedPaths, Does.Contain(@"DOCS\LongKeepName.Txt"));
+                Assert.That(reopened.GetFileContent(@"DOCS\BIGKEEP.BIN"), Is.EqualTo(bigContent));
+                Assert.That(reopened.GetFileContent(@"DOCS\LongKeepName.Txt"), Is.EqualTo(lfnContent));
+            });
+        }
+
+        #endregion
+
+        #region Duplicate Names And Short-Name Collisions (Issue #6)
+
+        [Test]
+        public async Task AddFile_WithDuplicateName_ThrowsAndKeepsSingleEntry()
+        {
+            // Arrange - a plain 8.3 file added once with distinguishable content.
+            var filePath = Path.Combine(_tempDirectory!, "dup-name.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+
+            var originalContent = Encoding.ASCII.GetBytes("ORIGINAL");
+            worker.AddFile("SAME.TXT", originalContent);
+
+            // Act / Assert - adding the same name again must fail without touching the image ...
+            Assert.Throws<IOException>(() => worker.AddFile("SAME.TXT", Encoding.ASCII.GetBytes("DUPLICATE")));
+            // ... and the comparison is case-insensitive.
+            Assert.Throws<IOException>(() => worker.AddFile("same.txt", Encoding.ASCII.GetBytes("DUPLICATE")));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(worker.FilesAndFolders.Count(f => f.Path.Equals("SAME.TXT", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(1));
+                Assert.That(worker.GetFileContent("SAME.TXT"), Is.EqualTo(originalContent));
+            });
+
+            // Persist + re-open: exactly one SAME.TXT entry survives and reads back the original bytes.
+            await worker.SaveAsync(filePath);
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var sameEntries = reopened.FilesAndFolders.Where(f => f.Path.Equals("SAME.TXT", StringComparison.OrdinalIgnoreCase)).ToList();
+            Assert.Multiple(() =>
+            {
+                Assert.That(sameEntries, Has.Count.EqualTo(1));
+                Assert.That(reopened.GetFileContent("SAME.TXT"), Is.EqualTo(originalContent));
+            });
+        }
+
+        [Test]
+        public async Task AddFile_WithLongNamesSharingShortNameBase_GetsDistinctAliasesAndRoundTrips()
+        {
+            // Arrange - two long names whose naive 8.3 truncation is the same (ABCDEFGH.TXT).
+            var filePath = Path.Combine(_tempDirectory!, "alias-collision.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+
+            var oneContent = Encoding.ASCII.GetBytes("ONE-PAYLOAD");
+            var twoContent = Encoding.ASCII.GetBytes("TWO-PAYLOAD-DIFFERENT");
+
+            // Act - both adds must succeed with distinct generated aliases.
+            worker.AddFile("abcdefgh-one.txt", oneContent);
+            worker.AddFile("abcdefgh-two.txt", twoContent);
+            await worker.SaveAsync(filePath);
+
+            // The two directory entries carry different 8.3 short names: the first keeps the free truncated base and
+            // the second falls back to a "~n" alias (ABCDEFGH.TXT -> ABCDEF~1.TXT).
+            var savedImage = await File.ReadAllBytesAsync(filePath);
+            var shortNames = ReadRootDirectoryShortNames(savedImage);
+            Assert.Multiple(() =>
+            {
+                Assert.That(shortNames, Has.Count.EqualTo(2));
+                Assert.That(shortNames.Distinct(StringComparer.OrdinalIgnoreCase).Count(), Is.EqualTo(2), "the two entries must not share a short name");
+                Assert.That(shortNames, Is.EquivalentTo(new[] { "ABCDEFGH.TXT", "ABCDEF~1.TXT" }));
+            });
+
+            // Re-open: both long names round-trip and each reads back its own bytes.
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain("abcdefgh-one.txt"));
+                Assert.That(paths, Does.Contain("abcdefgh-two.txt"));
+                Assert.That(reopened.GetFileContent("abcdefgh-one.txt"), Is.EqualTo(oneContent));
+                Assert.That(reopened.GetFileContent("abcdefgh-two.txt"), Is.EqualTo(twoContent));
+            });
+        }
+
+        [Test]
+        public async Task RenameEntry_OntoExistingCaseInsensitiveName_ThrowsAndKeepsSource()
+        {
+            // Arrange - two files that differ only by case in the root directory.
+            var filePath = Path.Combine(_tempDirectory!, "rename-collision.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+
+            var keepContent = Encoding.ASCII.GetBytes("KEEP-ME");
+            var otherContent = Encoding.ASCII.GetBytes("RENAME-SOURCE");
+            worker.AddFile("SAME.TXT", keepContent);
+            worker.AddFile("OTHER.TXT", otherContent);
+
+            // Act / Assert - renaming onto the existing name (case-insensitive) fails ...
+            Assert.Throws<IOException>(() => worker.RenameEntry("OTHER.TXT", "same.txt"));
+
+            // ... and the source entry is fully intact.
+            Assert.Multiple(() =>
+            {
+                var paths = worker.FilesAndFolders.Select(f => f.Path).ToList();
+                Assert.That(paths, Does.Contain("OTHER.TXT"));
+                Assert.That(paths, Does.Contain("SAME.TXT"));
+                Assert.That(worker.GetFileContent("OTHER.TXT"), Is.EqualTo(otherContent));
+                Assert.That(worker.GetFileContent("SAME.TXT"), Is.EqualTo(keepContent));
+            });
+
+            await worker.SaveAsync(filePath);
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var reopenedPaths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+            Assert.Multiple(() =>
+            {
+                Assert.That(reopenedPaths, Does.Contain("OTHER.TXT"));
+                Assert.That(reopened.GetFileContent("OTHER.TXT"), Is.EqualTo(otherContent));
+            });
+        }
+
+        [Test]
+        public async Task MoveEntry_OntoExistingCaseInsensitiveName_ThrowsAndKeepsSource()
+        {
+            // Arrange - a root file and a same-named (case-insensitive) file already living in DOCS.
+            var filePath = Path.Combine(_tempDirectory!, "move-collision.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "DOCS");
+
+            var sourceContent = Encoding.ASCII.GetBytes("ROOT-SOURCE");
+            var targetContent = Encoding.ASCII.GetBytes("TARGET-OCCUPANT");
+            worker.AddFile("MOVE.TXT", sourceContent);
+            worker.AddFile("DOCS", "move.txt", targetContent);
+            var freeBytesBefore = worker.GetFreeBytes();
+
+            // Act / Assert - the move onto an existing name fails ...
+            Assert.Throws<IOException>(() => worker.MoveEntry("MOVE.TXT", "DOCS"));
+
+            // ... and the source stays in the root, untouched and still readable.
+            Assert.Multiple(() =>
+            {
+                var paths = worker.FilesAndFolders.Select(f => f.Path).ToList();
+                Assert.That(paths, Does.Contain("MOVE.TXT"));
+                Assert.That(paths, Does.Not.Contain(@"DOCS\MOVE.TXT"));
+                Assert.That(worker.GetFileContent("MOVE.TXT"), Is.EqualTo(sourceContent));
+                Assert.That(worker.GetFileContent(@"DOCS\move.txt"), Is.EqualTo(targetContent));
+                Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBytesBefore));
+            });
+
+            await worker.SaveAsync(filePath);
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var reopenedPaths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+            Assert.Multiple(() =>
+            {
+                Assert.That(reopenedPaths, Does.Contain("MOVE.TXT"));
+                Assert.That(reopened.GetFileContent("MOVE.TXT"), Is.EqualTo(sourceContent));
+                Assert.That(reopened.GetFileContent(@"DOCS\move.txt"), Is.EqualTo(targetContent));
+            });
+        }
+
+        /// <summary>
+        /// Reads the 8.3 short names of every live, non-directory, non-volume-label entry from an image's root
+        /// directory so tests can assert on the generated aliases independent of the long-name layer.
+        /// </summary>
+        private static List<string> ReadRootDirectoryShortNames(byte[] image)
+        {
+            var bytesPerSector = BitConverter.ToUInt16(image, 11);
+            var reservedSectors = BitConverter.ToUInt16(image, 14);
+            var numFats = image[16];
+            var rootDirEntries = BitConverter.ToUInt16(image, 17);
+            var sectorsPerFat = BitConverter.ToUInt16(image, 22);
+            var rootDirOffset = (reservedSectors + (numFats * sectorsPerFat)) * bytesPerSector;
+
+            var shortNames = new List<string>();
+            for (var i = 0; i < rootDirEntries; i++)
+            {
+                var offset = rootDirOffset + (i * 32);
+                if (offset + 32 > image.Length)
+                    break;
+
+                var firstByte = image[offset];
+                if (firstByte == 0x00)
+                    break;
+                if (firstByte == 0xE5)
+                    continue;
+
+                var attr = image[offset + 11];
+                if ((attr & 0x0F) == 0x0F) // LFN fragment
+                    continue;
+                if ((attr & 0x08) != 0) // volume label
+                    continue;
+                if ((attr & 0x10) != 0) // directory
+                    continue;
+
+                var namePart = Encoding.ASCII.GetString(image, offset, 8).TrimEnd();
+                var extPart = Encoding.ASCII.GetString(image, offset + 8, 3).TrimEnd();
+                shortNames.Add(extPart.Length == 0 ? namePart : $"{namePart}.{extPart}");
+            }
+
+            return shortNames;
         }
 
         #endregion

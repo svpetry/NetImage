@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -109,6 +110,139 @@ namespace NetImage.Tests.ViewModels
             });
         }
 
+        [Test]
+        public async Task SaveCurrentImageBeforeDiscarding_WithNewImageAndChosenPath_SavesToDiskInsteadOfDiscarding()
+        {
+            var tempDir = CreateTempDir();
+            try
+            {
+                var targetPath = Path.Combine(tempDir, "newdisk.img");
+                var worker = CreateWorkerWithNestedFolder();
+                var viewModel = CreateViewModel(worker);
+                SetHasUnsavedChanges(viewModel, true);
+                SetPromptForSavePath(viewModel, () => targetPath);
+
+                var saved = await InvokeSaveCurrentImageBeforeDiscardingAsync(viewModel);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(saved, Is.True);
+                    Assert.That(File.Exists(targetPath), Is.True);
+                    Assert.That(worker.FilePath, Is.EqualTo(targetPath));
+                    Assert.That(viewModel.HasUnsavedChanges, Is.False);
+                });
+
+                var reopened = new DiskImageWorker(targetPath);
+                await reopened.OpenAsync();
+                Assert.That(reopened.IsLoaded, Is.True);
+            }
+            finally
+            {
+                DeleteTempDir(tempDir);
+            }
+        }
+
+        [Test]
+        public async Task SaveCurrentImageBeforeDiscarding_WithNewImageAndCancel_ReturnsFalseAndKeepsDirtyFlag()
+        {
+            var tempDir = CreateTempDir();
+            try
+            {
+                var worker = CreateWorkerWithNestedFolder();
+                var viewModel = CreateViewModel(worker);
+                SetHasUnsavedChanges(viewModel, true);
+                var prompted = false;
+                SetPromptForSavePath(viewModel, () =>
+                {
+                    prompted = true;
+                    return null;
+                });
+
+                var saved = await InvokeSaveCurrentImageBeforeDiscardingAsync(viewModel);
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(prompted, Is.True);
+                    Assert.That(saved, Is.False);
+                    Assert.That(viewModel.HasUnsavedChanges, Is.True);
+                    Assert.That(Directory.GetFiles(tempDir), Is.Empty);
+                });
+            }
+            finally
+            {
+                DeleteTempDir(tempDir);
+            }
+        }
+
+        [Test]
+        public async Task ExecuteClose_WhenSavePromptCancelled_AbortsWithoutDiscardingImage()
+        {
+            var tempDir = CreateTempDir();
+            try
+            {
+                var worker = CreateWorkerWithNestedFolder();
+                var viewModel = CreateViewModel(worker);
+                SetHasUnsavedChanges(viewModel, true);
+                SetPromptForSavePath(viewModel, () => null);
+                viewModel.CloseImageRequested += (_, e) =>
+                {
+                    e.AllowClose = true;
+                    e.SaveChanges = true;
+                };
+
+                InvokeExecuteClose(viewModel);
+                await WaitUntilAsync(() => Directory.GetFiles(tempDir).Length == 0, TimeSpan.FromMilliseconds(250));
+
+                var imageWorker = GetImageWorker(viewModel);
+                Assert.Multiple(() =>
+                {
+                    Assert.That(imageWorker, Is.Not.Null);
+                    Assert.That(viewModel.HasUnsavedChanges, Is.True);
+                });
+            }
+            finally
+            {
+                DeleteTempDir(tempDir);
+            }
+        }
+
+        [Test]
+        public async Task ExecuteClose_WhenSavePromptAccepted_SavesNewImageBeforeClosing()
+        {
+            var tempDir = CreateTempDir();
+            try
+            {
+                var targetPath = Path.Combine(tempDir, "saved.img");
+                var worker = CreateWorkerWithNestedFolder();
+                var viewModel = CreateViewModel(worker);
+                SetHasUnsavedChanges(viewModel, true);
+                var prompted = false;
+                SetPromptForSavePath(viewModel, () =>
+                {
+                    prompted = true;
+                    return targetPath;
+                });
+                viewModel.CloseImageRequested += (_, e) =>
+                {
+                    e.AllowClose = true;
+                    e.SaveChanges = true;
+                };
+
+                InvokeExecuteClose(viewModel);
+                await WaitUntilAsync(() => File.Exists(targetPath), TimeSpan.FromSeconds(2));
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(prompted, Is.True);
+                    Assert.That(File.Exists(targetPath), Is.True);
+                });
+            }
+            finally
+            {
+                DeleteTempDir(tempDir);
+            }
+        }
+
         private static MainViewModel CreateViewModel(DiskImageWorker worker)
         {
             var viewModel = new MainViewModel();
@@ -148,6 +282,69 @@ namespace NetImage.Tests.ViewModels
             }
 
             return null;
+        }
+
+        private static void SetPromptForSavePath(MainViewModel viewModel, Func<string?> prompt)
+        {
+            var field = typeof(MainViewModel).GetField("_promptForSavePath", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null);
+            field!.SetValue(viewModel, prompt);
+        }
+
+        private static void SetHasUnsavedChanges(MainViewModel viewModel, bool value)
+        {
+            var property = typeof(MainViewModel).GetProperty("HasUnsavedChanges", BindingFlags.Instance | BindingFlags.Public);
+            Assert.That(property, Is.Not.Null);
+            Assert.That(property!.CanWrite, Is.True);
+            property!.SetValue(viewModel, value);
+        }
+
+        private static DiskImageWorker? GetImageWorker(MainViewModel viewModel)
+        {
+            var field = typeof(MainViewModel).GetField("_imageWorker", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(field, Is.Not.Null);
+            return (DiskImageWorker?)field!.GetValue(viewModel);
+        }
+
+        private static async Task<bool> InvokeSaveCurrentImageBeforeDiscardingAsync(MainViewModel viewModel)
+        {
+            var method = typeof(MainViewModel).GetMethod("SaveCurrentImageBeforeDiscardingAsync", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            var task = (Task<bool>)method!.Invoke(viewModel, null)!;
+            return await task;
+        }
+
+        private static void InvokeExecuteClose(MainViewModel viewModel)
+        {
+            var method = typeof(MainViewModel).GetMethod("ExecuteClose", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(method, Is.Not.Null);
+            method!.Invoke(viewModel, new object?[] { null });
+        }
+
+        private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (!condition() && DateTime.UtcNow < deadline)
+                await Task.Delay(10);
+        }
+
+        private static string CreateTempDir()
+        {
+            var path = Path.Combine(Path.GetTempPath(), "NetImageTests_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        private static void DeleteTempDir(string path)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                    Directory.Delete(path, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
         }
     }
 }

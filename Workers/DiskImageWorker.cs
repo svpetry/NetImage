@@ -586,6 +586,110 @@ namespace NetImage.Workers
             }
         }
 
+        /// <summary>
+        /// Number of 32-byte entries in one addressable block of a directory: the whole fixed root directory area,
+        /// or a single cluster for a directory that lives in a cluster chain.
+        /// </summary>
+        private static int GetDirectoryEntriesPerBlock(DirectoryLocation directory, Bpb bpb)
+            => directory.FirstCluster == 0
+                ? directory.NumSectors * (int)bpb.BytesPerSector / 32
+                : (int)(bpb.BytesPerSector * bpb.SectorsPerCluster) / 32;
+
+        /// <summary>
+        /// Resolves an entry index inside a directory to its real byte offset. Clustered directories are walked
+        /// through their actual cluster chain, so entries that continue in the next chain cluster are addressed by
+        /// that cluster's own start instead of by extending the previous cluster's byte range.
+        /// Returns -1 when the index falls outside the directory.
+        /// </summary>
+        private int GetDirectoryEntryOffset(DirectoryLocation directory, int entryIndex, Bpb bpb)
+        {
+            var entriesPerBlock = GetDirectoryEntriesPerBlock(directory, bpb);
+            if (entryIndex < 0 || entriesPerBlock <= 0)
+                return -1;
+
+            if (directory.FirstCluster == 0)
+            {
+                if (entryIndex >= entriesPerBlock)
+                    return -1;
+
+                var rootOffset = (int)(directory.StartSector * bpb.BytesPerSector) + (entryIndex * 32);
+                return rootOffset + 32 <= _imageData!.Length ? rootOffset : -1;
+            }
+
+            var clusterIndex = entryIndex / entriesPerBlock;
+            var entryWithinCluster = entryIndex % entriesPerBlock;
+            var currentClusterIndex = 0;
+
+            foreach (var cluster in EnumerateClusterChain(directory.FirstCluster, bpb))
+            {
+                if (currentClusterIndex++ != clusterIndex)
+                    continue;
+
+                var offset = (int)(ClusterToSector(cluster, bpb) * bpb.BytesPerSector) + (entryWithinCluster * 32);
+                return offset + 32 <= _imageData!.Length ? offset : -1;
+            }
+
+            return -1;
+        }
+
+        /// <summary>
+        /// Resolves a run of <paramref name="count"/> consecutive directory entries starting at
+        /// <paramref name="startIndex"/>, following the directory's cluster chain wherever the run crosses a
+        /// cluster boundary.
+        /// </summary>
+        private List<int> GetDirectoryEntryOffsets(DirectoryLocation directory, int startIndex, int count, Bpb bpb)
+        {
+            var offsets = new List<int>(count);
+
+            for (int i = 0; i < count; i++)
+            {
+                var offset = GetDirectoryEntryOffset(directory, startIndex + i, bpb);
+                if (offset < 0)
+                    throw new InvalidOperationException("Directory entry chain does not cover the required directory entries.");
+
+                offsets.Add(offset);
+            }
+
+            return offsets;
+        }
+
+        /// <summary>
+        /// Maps a physical directory-entry offset back to its index inside the directory, so neighbouring entries
+        /// can be resolved through the cluster chain instead of by simple byte arithmetic.
+        /// Returns -1 when the offset does not belong to the directory.
+        /// </summary>
+        private int GetDirectoryEntryIndex(DirectoryLocation directory, int offset, Bpb bpb)
+        {
+            var imageData = _imageData!;
+            var entriesPerBlock = GetDirectoryEntriesPerBlock(directory, bpb);
+            if (entriesPerBlock <= 0)
+                return -1;
+
+            if (directory.FirstCluster == 0)
+            {
+                var rootStart = (int)(directory.StartSector * bpb.BytesPerSector);
+                if (offset < rootStart || offset >= rootStart + (entriesPerBlock * 32))
+                    return -1;
+
+                return (offset - rootStart) / 32;
+            }
+
+            var clusterSize = entriesPerBlock * 32;
+            var clusterIndex = 0;
+
+            foreach (var cluster in EnumerateClusterChain(directory.FirstCluster, bpb))
+            {
+                var clusterStart = (int)(ClusterToSector(cluster, bpb) * bpb.BytesPerSector);
+
+                if (offset >= clusterStart && offset < clusterStart + clusterSize && offset + 32 <= imageData.Length)
+                    return (clusterIndex * entriesPerBlock) + ((offset - clusterStart) / 32);
+
+                clusterIndex++;
+            }
+
+            return -1;
+        }
+
         private bool TryResolveDirectory(string path, Bpb bpb, out DirectoryLocation directory)
         {
             directory = GetRootDirectory(bpb);
@@ -632,7 +736,7 @@ namespace NetImage.Workers
 
                 // Try to read LFN first, fall back to short name if no LFN
                 var shortName = DecodeEntryName(entry);
-                var longName = ReadLongFileName(offset, bpb);
+                var longName = ReadLongFileName(directory, offset, bpb);
                 var name = longName ?? shortName;
 
                 if (name == "." || name == "..")
@@ -795,10 +899,11 @@ namespace NetImage.Workers
         }
 
         /// <summary>
-        /// Reads consecutive LFN entries preceding a short name entry and combines them into a full name.
-        /// Valid VFAT entries appear as N|LAST, N-1, ..., 1, then the short name entry.
+        /// Reads the LFN entries preceding a short name entry and combines them into a full name.
+        /// Valid VFAT entries appear as N|LAST, N-1, ..., 1, then the short name entry. The preceding entries are
+        /// located through the directory's cluster chain, so a chain that continues in a non-adjacent cluster works too.
         /// </summary>
-        private string? ReadLongFileName(int shortNameOffset, Bpb bpb)
+        private string? ReadLongFileName(DirectoryLocation directory, int shortNameOffset, Bpb bpb)
         {
             var imageData = _imageData!;
             var shortNameEntry = new ReadOnlySpan<byte>(imageData, shortNameOffset, 32);
@@ -806,70 +911,67 @@ namespace NetImage.Workers
             // Get expected checksum from the short name entry
             byte expectedChecksum = CalculateChecksum(shortNameEntry);
 
-            // Check if the previous entry is an LFN entry
-            int offset = shortNameOffset - 32;
-
-            // Make sure we don't go out of bounds
-            if (offset < 0 || offset + 32 > imageData.Length)
-            {
-                return null;
-            }
-
-            var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
-            byte firstByte = entry[0];
-
-            // Stop if not an LFN entry
-            if (firstByte == 0x00 || firstByte == 0xE5 || !IsLfNEntry(entry))
+            // Check if there are any LFN entries in front of the short name entry
+            var lfnOffsets = GetLfNEntryOffsets(directory, shortNameOffset, bpb);
+            if (lfnOffsets.Count == 0)
             {
                 return null; // No LFN
             }
 
-            var lfnParts = new List<string>();
-            byte expectedSequence = 1;
-            bool foundLastEntry = false;
+            // Entries are laid out in directory order as N|LAST, N-1, ..., 1 right before the short name entry, while
+            // sequence numbers count outwards from the short name entry, so the parts are joined from the closest one.
+            var lfnParts = new List<string>(lfnOffsets.Count);
 
-            // Read backwards from the short name entry:
-            // the closest LFN entry is sequence 1, then 2, and so on until the LAST entry.
-            while (offset >= 0)
+            for (int i = lfnOffsets.Count - 1; i >= 0; i--)
             {
-                entry = new ReadOnlySpan<byte>(imageData, offset, 32);
-                firstByte = entry[0];
+                var entry = new ReadOnlySpan<byte>(imageData, lfnOffsets[i], 32);
+                var firstByte = entry[0];
 
-                // Stop at empty or deleted entry
-                if (firstByte == 0x00 || firstByte == 0xE5)
-                    break;
+                if (GetLfNSequenceNumber(firstByte) != lfnOffsets.Count - i)
+                    return null;
 
-                // Stop if not an LFN entry
-                if (!IsLfNEntry(entry))
-                    break;
-
-                var sequenceNumber = GetLfNSequenceNumber(firstByte);
-                if (sequenceNumber != expectedSequence)
+                if (IsLastLfNEntry(firstByte) != (i == 0))
                     return null;
 
                 if (entry[13] != expectedChecksum)
                     return null;
 
                 lfnParts.Add(DecodeLfNEntry(entry));
-
-                if (IsLastLfNEntry(firstByte))
-                {
-                    foundLastEntry = true;
-                    break;
-                }
-
-                // Move to previous entry
-                expectedSequence++;
-                offset -= 32;
             }
-
-            if (!foundLastEntry)
-                return null;
 
             // Combine all parts
             var fullLfN = string.Join("", lfnParts);
 
             return string.IsNullOrEmpty(fullLfN) ? null : fullLfN;
+        }
+
+        /// <summary>
+        /// Collects the offsets of the LFN entries that belong to a short name entry, walking backwards through the
+        /// directory's cluster chain. Offsets are returned in directory order (first LFN entry first).
+        /// </summary>
+        private List<int> GetLfNEntryOffsets(DirectoryLocation directory, int shortNameOffset, Bpb bpb)
+        {
+            var imageData = _imageData!;
+            var offsets = new List<int>();
+
+            int entryIndex = GetDirectoryEntryIndex(directory, shortNameOffset, bpb);
+            int offset = GetDirectoryEntryOffset(directory, entryIndex - 1, bpb);
+
+            while (offset >= 0)
+            {
+                var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
+                var firstByte = entry[0];
+
+                if (firstByte == 0x00 || firstByte == 0xE5 || !IsLfNEntry(entry))
+                    break;
+
+                offsets.Insert(0, offset);
+
+                entryIndex--;
+                offset = GetDirectoryEntryOffset(directory, entryIndex - 1, bpb);
+            }
+
+            return offsets;
         }
 
         /// <summary>
@@ -945,6 +1047,131 @@ namespace NetImage.Workers
             return namePart + extPart;
         }
 
+        /// <summary>
+        /// Converts a space-padded on-disk 8.3 name (an 11-char "name(8)+ext(3)" string as produced by
+        /// <see cref="EncodeFileName"/>) into the dotted display form used by <see cref="DecodeEntryName"/>, so
+        /// generated aliases can be compared against existing entry names on equal footing.
+        /// </summary>
+        private static string ShortPaddedToDisplay(string paddedShortName)
+        {
+            var namePart = paddedShortName.Substring(0, 8).TrimEnd(' ');
+            var extPart = paddedShortName.Substring(8, 3).TrimEnd(' ');
+            return extPart.Length == 0 ? namePart : $"{namePart}.{extPart}";
+        }
+
+        /// <summary>
+        /// Builds a MS-DOS style "~n" short-name alias from the already truncated 8.3 base (the padded name and
+        /// extension parts) by keeping the leading characters that still fit beside the numeric tail.
+        /// </summary>
+        private static string BuildAliasShortName(string namePartPadded, string extPartPadded, int sequence)
+        {
+            var tail = "~" + sequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var maxBaseLength = 8 - tail.Length;
+            if (maxBaseLength < 1)
+                throw new IOException("Too many short-name collisions in this directory to generate a unique 8.3 alias.");
+
+            var basePart = namePartPadded.Substring(0, Math.Min(maxBaseLength, namePartPadded.Length));
+            return (basePart + tail).PadRight(8, ' ') + extPartPadded;
+        }
+
+        /// <summary>
+        /// Produces a unique 8.3 short name for <paramref name="fileName"/> that does not collide with any name in
+        /// <paramref name="takenShortNames"/> (the dotted display form). The full truncation is used when it is still
+        /// free; otherwise a deterministic, bounded "~1", "~2", ... tail is appended until the alias is unique.
+        /// </summary>
+        private static string GenerateUniqueShortName(string fileName, ISet<string> takenShortNames)
+        {
+            var fullShortName = EncodeFileName(fileName);
+            if (!takenShortNames.Contains(ShortPaddedToDisplay(fullShortName)))
+                return fullShortName;
+
+            var namePartPadded = fullShortName.Substring(0, 8);
+            var extPartPadded = fullShortName.Substring(8, 3);
+
+            for (int sequence = 1; ; sequence++)
+            {
+                var candidate = BuildAliasShortName(namePartPadded, extPartPadded, sequence);
+                if (!takenShortNames.Contains(ShortPaddedToDisplay(candidate)))
+                    return candidate;
+            }
+        }
+
+        /// <summary>
+        /// Collects the dotted short (8.3) names of every live, non-special entry in a directory. Deleted entries,
+        /// LFN fragments, volume labels and the "."/".." entries are ignored, mirroring the readers.
+        /// </summary>
+        private HashSet<string> CollectShortNames(DirectoryLocation directory, Bpb bpb)
+        {
+            var imageData = _imageData!;
+            var shortNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
+            {
+                var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
+                var firstByte = entry[0];
+                if (firstByte == 0x00)
+                    break;
+
+                if (IsDeletedEntry(firstByte) || IsLfNEntry(entry))
+                    continue;
+
+                const byte ATTR_VOLUME_LABEL = 0x08;
+                if ((entry[11] & ATTR_VOLUME_LABEL) != 0)
+                    continue;
+
+                var shortName = DecodeEntryName(entry);
+                if (shortName == "." || shortName == "..")
+                    continue;
+
+                shortNames.Add(shortName);
+            }
+
+            return shortNames;
+        }
+
+        /// <summary>
+        /// Rejects a new or renamed entry whose name would collide with an existing entry in the directory, compared
+        /// case-insensitively against both the readable name (long name when present, otherwise the short 8.3 name)
+        /// and the short 8.3 alias itself, so two entries never become indistinguishable to this reader or external
+        /// FAT tools. <paramref name="ignoreName"/> lets a rename skip the entry it is currently renaming.
+        /// </summary>
+        private void ThrowIfNameCollision(DirectoryLocation directory, string name, Bpb bpb, string? ignoreName = null)
+        {
+            var imageData = _imageData!;
+
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
+            {
+                var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
+                var firstByte = entry[0];
+                if (firstByte == 0x00)
+                    break;
+
+                if (IsDeletedEntry(firstByte) || IsLfNEntry(entry))
+                    continue;
+
+                const byte ATTR_VOLUME_LABEL = 0x08;
+                if ((entry[11] & ATTR_VOLUME_LABEL) != 0)
+                    continue;
+
+                var shortName = DecodeEntryName(entry);
+                if (shortName == "." || shortName == "..")
+                    continue;
+
+                var longName = ReadLongFileName(directory, offset, bpb);
+                var existingName = longName ?? shortName;
+
+                // The entry being renamed is never a collision with itself.
+                if (ignoreName != null &&
+                    (existingName.Equals(ignoreName, StringComparison.OrdinalIgnoreCase) ||
+                     shortName.Equals(ignoreName, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
+                if (existingName.Equals(name, StringComparison.OrdinalIgnoreCase) ||
+                    shortName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException($"An entry with the name '{name}' already exists in this directory.");
+            }
+        }
+
         private bool IsDirectoryEntry(ReadOnlySpan<byte> entry)
         {
             // Attribute byte is at offset 11
@@ -972,6 +1199,41 @@ namespace NetImage.Workers
             var clusterOffset = (cluster - 2) * sectorsPerCluster;
 
             return dataStartSector + clusterOffset;
+        }
+
+        /// <summary>
+        /// Combines a host destination root with a path taken from the disk image, stripping root
+        /// indicators and neutralizing '.'/'..' segments so the result always stays inside the root.
+        /// Returns null when nothing is left of the image path after sanitization.
+        /// </summary>
+        public static string? ResolveSafeDestinationPath(string destinationRoot, string imageRelativePath)
+        {
+            var root = System.IO.Path.GetFullPath(destinationRoot);
+            var rootPrefix = root.EndsWith(System.IO.Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
+                ? root
+                : root + System.IO.Path.DirectorySeparatorChar;
+
+            var current = root;
+            var segments = imageRelativePath.Split(
+                new[] { System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar },
+                StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var segment in segments)
+            {
+                if (segment == "." || segment == ".." || !string.IsNullOrEmpty(System.IO.Path.GetPathRoot(segment)))
+                    continue;
+
+                current = System.IO.Path.Combine(current, segment);
+            }
+
+            var fullDestination = System.IO.Path.GetFullPath(current);
+
+            // Belt and braces: reject anything that still escapes the root or collapses onto it.
+            if (!fullDestination.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(fullDestination, root, StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            return fullDestination;
         }
 
         public void ExtractFolder(string sourcePath, string hostDestinationPath)
@@ -1004,7 +1266,9 @@ namespace NetImage.Workers
             foreach (var item in entriesToExtract)
             {
                 var entry = item.Entry;
-                var destFullPath = System.IO.Path.Combine(hostDestinationPath, item.RelativePath);
+                var destFullPath = ResolveSafeDestinationPath(hostDestinationPath, item.RelativePath);
+                if (destFullPath == null)
+                    continue;
 
                 if (entry.Size == null)
                 {
@@ -1084,7 +1348,7 @@ namespace NetImage.Workers
                 if (shortName == "." || shortName == "..")
                     continue;
 
-                var longName = ReadLongFileName(offset, bpb);
+                var longName = ReadLongFileName(directory, offset, bpb);
                 var name = longName ?? shortName;
 
                 // Check if this is the file we're looking for
@@ -1288,7 +1552,7 @@ namespace NetImage.Workers
                 if ((entry[11] & 0x08) != 0) continue; // volume label
                 if (IsDirectoryEntry(entry)) continue;
 
-                var longName = ReadLongFileName(offset, bpb);
+                var longName = ReadLongFileName(currentDirectory, offset, bpb);
                 var entryName = longName ?? shortName;
 
                 if (entryName.Equals(fileName, StringComparison.OrdinalIgnoreCase))
@@ -1469,7 +1733,7 @@ namespace NetImage.Workers
                 if ((entry[11] & 0x08) != 0) continue; // volume label
 
                 // Try to get LFN name for comparison
-                var longName = ReadLongFileName(offset, bpb);
+                var longName = ReadLongFileName(directory, offset, bpb);
                 var entryName = longName ?? shortName;
 
                 if (IsDirectoryEntry(entry) && entryName.Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -1497,6 +1761,8 @@ namespace NetImage.Workers
         {
             var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
             var fatOffset = (int)(fatStartSector * bpb.BytesPerSector);
+            var sectorsPerFat = bpb.SectorsPerFat == 0 ? bpb.SectorsPerFat16 : bpb.SectorsPerFat;
+            var fatSizeBytes = (int)(sectorsPerFat * bpb.BytesPerSector);
 
             if (IsFat12(bpb))
             {
@@ -1504,7 +1770,7 @@ namespace NetImage.Workers
                 var entryOffset = (int)(cluster * 3 / 2);
                 var fatEntryStart = fatOffset + entryOffset;
 
-                if (fatEntryStart + 2 > _imageData!.Length)
+                if (fatEntryStart + 2 > _imageData!.Length || entryOffset + 2 > fatSizeBytes)
                     return GetEndOfChainMarker(bpb);
 
                 var fatValue = (ushort)(_imageData[fatEntryStart] | (_imageData[fatEntryStart + 1] << 8));
@@ -1522,7 +1788,7 @@ namespace NetImage.Workers
                 var entryOffset = (int)(cluster * 2);
                 var fatEntryStart = fatOffset + entryOffset;
 
-                if (fatEntryStart + 2 > _imageData!.Length)
+                if (fatEntryStart + 2 > _imageData!.Length || entryOffset + 2 > fatSizeBytes)
                     return GetEndOfChainMarker(bpb);
 
                 return BitConverter.ToUInt16(_imageData.AsSpan(fatEntryStart, 2));
@@ -1546,7 +1812,7 @@ namespace NetImage.Workers
                     var entryOffset = (int)(cluster * 3 / 2);
                     var fatEntryStart = fatOffset + entryOffset;
 
-                    if (fatEntryStart + 2 > _imageData!.Length)
+                    if (fatEntryStart + 2 > _imageData!.Length || entryOffset + 2 > fatSizeBytes)
                         return;
 
                     var existingValue = (ushort)(_imageData[fatEntryStart] | (_imageData[fatEntryStart + 1] << 8));
@@ -1573,7 +1839,7 @@ namespace NetImage.Workers
                     var entryOffset = (int)(cluster * 2);
                     var fatEntryStart = fatOffset + entryOffset;
 
-                    if (fatEntryStart + 2 > _imageData!.Length)
+                    if (fatEntryStart + 2 > _imageData!.Length || entryOffset + 2 > fatSizeBytes)
                         return;
 
                     var value16 = (ushort)value;
@@ -1613,17 +1879,15 @@ namespace NetImage.Workers
                 throw new InvalidOperationException("Cluster chain is shorter than the file content being written.");
         }
 
-        private void CreateDirectoryEntry(DirectoryLocation directory, string fileName, uint fileSize, uint firstCluster, bool isDirectory, Bpb bpb)
+        /// <summary>
+        /// Scans a directory for a run of <paramref name="count"/> consecutive free (empty or deleted) entry slots,
+        /// following the same rules <see cref="CreateDirectoryEntry"/> uses. On success the offsets of the run are
+        /// returned in <paramref name="freeEntryOffsets"/> as the real entry offsets reported by the chain-aware
+        /// enumerator, because consecutive directory entries can live in different, non-adjacent clusters.
+        /// </summary>
+        private bool TryFindFreeEntryRun(DirectoryLocation directory, int count, Bpb bpb, List<int> freeEntryOffsets)
         {
             var imageData = _imageData!;
-
-            // Check if we need LFN entries for this filename
-            int lfnEntriesNeeded = NeedsLfNEntry(fileName) ? GetLfnEntryCount(fileName) : 0;
-            int totalEntriesNeeded = lfnEntriesNeeded + 1;
-
-            // Find free entries
-            int freeStartOffset = -1;
-            int consecutiveFree = 0;
 
             foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
             {
@@ -1633,35 +1897,107 @@ namespace NetImage.Workers
                 if (firstByte == 0x00 || firstByte == 0xE5)
                 {
                     // Found a free entry (empty or deleted)
-                    if (consecutiveFree == 0)
-                        freeStartOffset = offset;
-                    consecutiveFree++;
+                    freeEntryOffsets.Add(offset);
 
-                    if (consecutiveFree >= totalEntriesNeeded)
-                    {
-                        // Found enough consecutive free entries
-                        WriteEntryChain(freeStartOffset, fileName, fileSize, firstCluster, isDirectory, lfnEntriesNeeded);
-                        return;
-                    }
+                    if (freeEntryOffsets.Count >= count)
+                        return true;
                 }
                 else
                 {
-                    // Active entry - reset counter unless this is an LFN entry (which can be reused)
+                    // Active entry - reset the run unless this is an LFN entry (which can be reused)
                     if (!IsLfNEntry(entry))
-                    {
-                        consecutiveFree = 0;
-                        freeStartOffset = -1;
-                    }
+                        freeEntryOffsets.Clear();
                 }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Locates a file entry by short or long name and returns its directory offset, first cluster and size.
+        /// Directories and special entries are ignored, mirroring the matching rules of <see cref="ReadFileContent"/>.
+        /// </summary>
+        private bool TryFindFileEntry(DirectoryLocation directory, string fileName, Bpb bpb, out int entryOffset, out uint firstCluster, out uint fileSize)
+        {
+            var imageData = _imageData!;
+
+            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
+            {
+                var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
+                var firstByte = entry[0];
+                if (firstByte == 0x00)
+                    break;
+
+                if (IsDeletedEntry(firstByte))
+                    continue;
+
+                if (IsLfNEntry(entry))
+                    continue;
+
+                // Skip volume label entries
+                const byte ATTR_VOLUME_LABEL = 0x08;
+                if ((entry[11] & ATTR_VOLUME_LABEL) != 0)
+                    continue;
+
+                var shortName = DecodeEntryName(entry);
+                if (shortName == "." || shortName == "..")
+                    continue;
+
+                var longName = ReadLongFileName(directory, offset, bpb);
+                var name = longName ?? shortName;
+
+                if (name.Equals(fileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    entryOffset = -1;
+                    firstCluster = 0;
+                    fileSize = 0;
+                    if (IsDirectoryEntry(entry))
+                        return false;
+
+                    entryOffset = offset;
+                    firstCluster = GetFirstCluster(entry);
+                    fileSize = BitConverter.ToUInt32(entry.Slice(28, 4));
+                    return true;
+                }
+            }
+
+            entryOffset = -1;
+            firstCluster = 0;
+            fileSize = 0;
+            return false;
+        }
+
+        private void CreateDirectoryEntry(DirectoryLocation directory, string fileName, uint fileSize, uint firstCluster, bool isDirectory, Bpb bpb)
+        {
+            // Reject a duplicate name before any directory slot is claimed so a rejected add never mutates the image.
+            ThrowIfNameCollision(directory, fileName, bpb);
+
+            // Check if we need LFN entries for this filename
+            int lfnEntriesNeeded = NeedsLfNEntry(fileName) ? GetLfnEntryCount(fileName) : 0;
+            int totalEntriesNeeded = lfnEntriesNeeded + 1;
+
+            // Generate a short (8.3) name that is unique within the directory: long names that truncate to the same
+            // base share it only while it is free, otherwise a canonical "~n" alias (ABCDEF~1.TXT, ...) is chosen and
+            // written into the short entry so every distinct long name round-trips with its own bytes.
+            var shortName = GenerateUniqueShortName(fileName, CollectShortNames(directory, bpb));
+
+            // Find free entries. The run is collected as the real entry offsets reported by the chain-aware
+            // enumerator, because consecutive directory entries can live in different, non-adjacent clusters.
+            var freeEntryOffsets = new List<int>(totalEntriesNeeded);
+            if (TryFindFreeEntryRun(directory, totalEntriesNeeded, bpb, freeEntryOffsets))
+            {
+                // Found enough consecutive free entries
+                WriteEntryChain(freeEntryOffsets, fileName, shortName, fileSize, firstCluster, isDirectory, lfnEntriesNeeded);
+                return;
             }
 
             if (directory.FirstCluster == 0)
                 throw new InvalidOperationException("No free directory entries available.");
 
-            // Expand directory and try again
+            // Expand directory and use the fresh cluster, which is empty from the start.
             var expandedCluster = ExpandDirectory(directory, bpb);
-            var expandedOffset = (int)(ClusterToSector(expandedCluster, bpb) * bpb.BytesPerSector);
-            WriteEntryChain(expandedOffset, fileName, fileSize, firstCluster, isDirectory, lfnEntriesNeeded);
+            var expandedOffsets = GetDirectoryEntryOffsets(GetSubdirectoryLocation(expandedCluster, bpb), 0, totalEntriesNeeded, bpb);
+            WriteEntryChain(expandedOffsets, fileName, shortName, fileSize, firstCluster, isDirectory, lfnEntriesNeeded);
         }
 
         /// <summary>
@@ -1711,28 +2047,24 @@ namespace NetImage.Workers
         }
 
         /// <summary>
-        /// Writes LFN entries (if needed) followed by the short name entry.
+        /// Writes LFN entries (if needed) followed by the short name entry. The offsets are the already resolved
+        /// directory entry positions, so a chain may cross a directory cluster boundary anywhere.
         /// </summary>
-        private void WriteEntryChain(int offset, string fileName, uint fileSize, uint firstCluster, bool isDirectory, int lfnEntriesNeeded)
+        private void WriteEntryChain(IReadOnlyList<int> entryOffsets, string fileName, string shortName, uint fileSize, uint firstCluster, bool isDirectory, int lfnEntriesNeeded)
         {
-            var imageData = _imageData!;
-
             if (lfnEntriesNeeded > 0)
             {
                 // Write LFN entries first
-                var shortName = EncodeFileName(fileName);
                 var shortNameBytes = System.Text.Encoding.ASCII.GetBytes(shortName);
-                WriteLfNEntries(offset, fileName, shortNameBytes, lfnEntriesNeeded);
+                WriteLfNEntries(entryOffsets, fileName, shortNameBytes, lfnEntriesNeeded);
 
                 // Write short name entry after LFN entries
-                var shortNameOffset = offset + (lfnEntriesNeeded * 32);
-                WriteDirectoryEntry(shortNameOffset, shortName, fileSize, firstCluster, isDirectory);
+                WriteDirectoryEntry(entryOffsets[lfnEntriesNeeded], shortName, fileSize, firstCluster, isDirectory);
             }
             else
             {
                 // Just write the short name entry directly
-                var shortName = EncodeFileName(fileName);
-                WriteDirectoryEntry(offset, shortName, fileSize, firstCluster, isDirectory);
+                WriteDirectoryEntry(entryOffsets[0], shortName, fileSize, firstCluster, isDirectory);
             }
         }
 
@@ -1740,14 +2072,15 @@ namespace NetImage.Workers
         /// Writes LFN entries for a long filename.
         /// On disk, valid VFAT entries appear as N|LAST, N-1, ..., 1, then the short name entry.
         /// </summary>
-        private void WriteLfNEntries(int offset, string longName, byte[] shortNameBytes, int lfnEntriesNeeded)
+        private void WriteLfNEntries(IReadOnlyList<int> entryOffsets, string longName, byte[] shortNameBytes, int lfnEntriesNeeded)
         {
             var imageData = _imageData!;
             byte checksum = CalculateChecksum(shortNameBytes.AsSpan());
 
             for (int entryNum = 1; entryNum <= lfnEntriesNeeded; entryNum++)
             {
-                int entryOffset = offset + ((lfnEntriesNeeded - entryNum) * 32);
+                // The entries are given in directory order, so the farthest entry is the first one.
+                int entryOffset = entryOffsets[lfnEntriesNeeded - entryNum];
 
                 // Clear the entry
                 Array.Clear(imageData, entryOffset, 32);
@@ -2023,16 +2356,49 @@ namespace NetImage.Workers
                 return;
             }
 
-            // Read file content
-            var content = GetFileContent(sourcePath);
-            if (content == null)
+            var partitionByteOffset = _partitionStartSector * 512;
+            var bpb = ParseBpb(new ReadOnlySpan<byte>(_imageData, (int)partitionByteOffset, 512));
+
+            // Validate every precondition up front so a move that cannot complete never touches the image.
+            if (!TryResolveDirectory(sourceDirectory, bpb, out var sourceDir)
+                || !TryFindFileEntry(sourceDir, fileName, bpb, out var sourceEntryOffset, out var firstCluster, out var fileSize))
                 throw new FileNotFoundException($"File '{sourcePath}' not found in the disk image.");
 
-            // Delete original entry
-            DeleteEntry(sourcePath);
+            if (!TryResolveDirectory(targetDirectory, bpb, out var targetDir))
+                throw new InvalidOperationException($"Directory '{targetDirectory}' not found on the disk image.");
 
-            // Add file to new location
-            AddFileInternal(targetDirectory, fileName, content);
+            // Reject a move onto an existing name before anything is written so the source entry is never touched
+            // when the destination already holds an entry with the same readable or short name.
+            ThrowIfNameCollision(targetDir, fileName, bpb);
+
+            // The destination must be able to hold every entry the moved name needs, LFN entries included.
+            int lfnEntriesNeeded = NeedsLfNEntry(fileName) ? GetLfnEntryCount(fileName) : 0;
+            var freeSlotOffsets = new List<int>(lfnEntriesNeeded + 1);
+            if (!TryFindFreeEntryRun(targetDir, lfnEntriesNeeded + 1, bpb, freeSlotOffsets) && targetDir.FirstCluster == 0)
+                throw new InvalidOperationException("No free directory entries available.");
+
+            // Create the destination entry first while it still reuses the source's cluster chain, so no file data
+            // is copied and no clusters are reallocated. The source stays fully intact until this succeeds.
+            try
+            {
+                CreateDirectoryEntry(targetDir, fileName, fileSize, firstCluster, false, bpb);
+            }
+            catch
+            {
+                // Neutralise every slot the destination scan had reserved so a partially written entry cannot
+                // survive as a stray file. The source entry has not been touched yet.
+                foreach (var offset in freeSlotOffsets)
+                    _imageData[offset] = 0xE5;
+
+                throw;
+            }
+
+            // The destination entry exists now, so only the source's directory entries have to go. The cluster
+            // chain is deliberately NOT freed here: it belongs to the destination entry.
+            foreach (var lfnOffset in GetLfNEntryOffsets(sourceDir, sourceEntryOffset, bpb))
+                _imageData[lfnOffset] = 0xE5;
+
+            _imageData[sourceEntryOffset] = 0xE5;
 
             ParseFatFilesystem();
         }
@@ -2071,7 +2437,7 @@ namespace NetImage.Workers
                     continue;
 
                 // Try to get LFN name for comparison
-                var longName = ReadLongFileName(offset, bpb);
+                var longName = ReadLongFileName(directory, offset, bpb);
                 var compareName = longName ?? entryName;
 
                 // Check if this is the entry we're looking for
@@ -2093,30 +2459,11 @@ namespace NetImage.Workers
                         FreeClusterChain(firstCluster, bpb);
                     }
 
-                    // Count and delete LFN entries preceding this short name entry
-                    int lfnCount = 0;
-                    int lfnCheckOffset = offset - 32;
-                    while (lfnCheckOffset >= 0)
+                    // Delete the LFN entries belonging to this short name entry. They are resolved through the
+                    // directory's cluster chain instead of by stepping back 32 bytes at a time.
+                    foreach (var lfnOffset in GetLfNEntryOffsets(directory, offset, bpb))
                     {
-                        var lfnEntry = new ReadOnlySpan<byte>(imageData, lfnCheckOffset, 32);
-                        byte lfnFirstByte = lfnEntry[0];
-                        if (lfnFirstByte == 0x00 || lfnFirstByte == 0xE5)
-                            break;
-                        if (IsLfNEntry(lfnEntry))
-                        {
-                            lfnCount++;
-                            lfnCheckOffset -= 32;
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
-
-                    // Mark LFN entries as deleted
-                    for (int i = 0; i < lfnCount; i++)
-                    {
-                        imageData[offset - ((lfnCount - i) * 32)] = 0xE5;
+                        imageData[lfnOffset] = 0xE5;
                     }
 
                     // Mark short name entry as deleted
@@ -2149,32 +2496,9 @@ namespace NetImage.Workers
 
             System.Diagnostics.Debug.WriteLine($"RenameEntryInternal: renaming '{oldName}' to '{newName}' in directory starting at sector {directory.StartSector}");
 
-            // Check if new name already exists
-            foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
-            {
-                var entry = new ReadOnlySpan<byte>(imageData, offset, 32);
-                var firstByte = entry[0];
-
-                if (firstByte == 0x00)
-                    break;
-
-                if (IsDeletedEntry(firstByte))
-                    continue;
-
-                if (IsLfNEntry(entry))
-                    continue;
-
-                if ((entry[11] & 0x08) != 0)
-                    continue;
-
-                var entryName = DecodeEntryName(entry);
-                var longName = ReadLongFileName(offset, bpb);
-                var compareName = longName ?? entryName;
-                if (compareName != "." && compareName != ".." && compareName.Equals(newName, StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new IOException($"An entry with the name '{newName}' already exists in this directory.");
-                }
-            }
+            // Reject a rename onto an existing name (matching readable names or existing short aliases), while never
+            // treating the entry currently being renamed as a collision with itself.
+            ThrowIfNameCollision(directory, newName, bpb, ignoreName: oldName);
 
             // Find and rename the entry
             foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
@@ -2195,30 +2519,14 @@ namespace NetImage.Workers
                     continue;
 
                 var entryName = DecodeEntryName(entry);
-                var longName = ReadLongFileName(offset, bpb);
+                var longName = ReadLongFileName(directory, offset, bpb);
                 var compareName = longName ?? entryName;
 
                 if (compareName.Equals(oldName, StringComparison.OrdinalIgnoreCase))
                 {
-                    // Count existing LFN entries
-                    int lfnCount = 0;
-                    int lfnCheckOffset = offset - 32;
-                    while (lfnCheckOffset >= 0)
-                    {
-                        var lfnEntry = new ReadOnlySpan<byte>(imageData, lfnCheckOffset, 32);
-                        byte lfnFirstByte = lfnEntry[0];
-                        if (lfnFirstByte == 0x00 || lfnFirstByte == 0xE5)
-                            break;
-                        if (IsLfNEntry(lfnEntry))
-                        {
-                            lfnCount++;
-                            lfnCheckOffset -= 32;
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
+                    // Collect the existing LFN entries through the directory's cluster chain
+                    var lfnOffsets = GetLfNEntryOffsets(directory, offset, bpb);
+                    int lfnCount = lfnOffsets.Count;
 
                     // Calculate new LFN requirements
                     int newLfnCount = NeedsLfNEntry(newName) ? GetLfnEntryCount(newName) : 0;
@@ -2228,12 +2536,16 @@ namespace NetImage.Workers
                         throw new IOException($"Renaming '{oldName}' to '{newName}' would change the number of directory entries required. This operation is not supported. Delete and re-create the entry instead.");
                     }
 
+                    // Reuse this entry's own short-name slot so the renamed entry gets a collision-free alias.
+                    var takenShortNames = CollectShortNames(directory, bpb);
+                    takenShortNames.Remove(entryName);
+                    var newShortName = GenerateUniqueShortName(newName, takenShortNames);
+
                     if (newLfnCount > 0)
                     {
                         // Update LFN entries and short name
-                        var newShortName = EncodeFileName(newName);
                         var shortNameBytes = System.Text.Encoding.ASCII.GetBytes(newShortName);
-                        WriteLfNEntries(offset - (newLfnCount * 32), newName, shortNameBytes, newLfnCount);
+                        WriteLfNEntries(lfnOffsets, newName, shortNameBytes, newLfnCount);
 
                         // Update short name entry
                         var entryBuffer = new byte[32];
@@ -2247,12 +2559,11 @@ namespace NetImage.Workers
                     else
                     {
                         // No LFN - just update the short name
-                        var newShortName = EncodeFileName(newName);
 
                         // Clear old LFN entries if any
-                        for (int i = 0; i < lfnCount; i++)
+                        foreach (var lfnOffset in lfnOffsets)
                         {
-                            imageData[offset - ((lfnCount - i) * 32)] = 0xE5;
+                            imageData[lfnOffset] = 0xE5;
                         }
 
                         // Update short name entry
@@ -2330,6 +2641,8 @@ namespace NetImage.Workers
             // Calculate FAT entry offset (FAT12 uses 1.5 bytes per entry, FAT16 uses 2 bytes)
             var fatStartSector = _partitionStartSector + bpb.ReservedSectors;
             var fatOffset = (int)(fatStartSector * bpb.BytesPerSector);
+            var sectorsPerFat = bpb.SectorsPerFat == 0 ? bpb.SectorsPerFat16 : bpb.SectorsPerFat;
+            var fatSizeBytes = (int)(sectorsPerFat * bpb.BytesPerSector);
 
             System.Diagnostics.Debug.WriteLine($"    GetNextCluster: cluster={currentCluster}, fatStartSector={fatStartSector}, fatOffset={fatOffset}");
 
@@ -2339,7 +2652,7 @@ namespace NetImage.Workers
                 var entryOffset = (int)(currentCluster * 3 / 2);
                 var fatEntryStart = fatOffset + entryOffset;
 
-                if (fatEntryStart + 2 > _imageData!.Length)
+                if (fatEntryStart + 2 > _imageData!.Length || entryOffset + 2 > fatSizeBytes)
                 {
                     System.Diagnostics.Debug.WriteLine($"    FAT12: out of bounds, returning 0");
                     return 0;
@@ -2366,7 +2679,7 @@ namespace NetImage.Workers
                 var entryOffset = (int)(currentCluster * 2);
                 var fatEntryStart = fatOffset + entryOffset;
 
-                if (fatEntryStart + 2 > _imageData!.Length)
+                if (fatEntryStart + 2 > _imageData!.Length || entryOffset + 2 > fatSizeBytes)
                 {
                     System.Diagnostics.Debug.WriteLine($"    FAT16: out of bounds, returning 0");
                     return 0;
@@ -2562,13 +2875,7 @@ namespace NetImage.Workers
             uint rootDirEntries = 512; // Standard for FAT16
 
             uint bytesPerSector = 512;
-            uint rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
-            uint dataSectors = partitionSectors - reservedSectors - (numFats * CalculateFat16Sectors(partitionSectors, sectorsPerCluster, reservedSectors, numFats, rootDirEntries));
-
-            // Recalculate to ensure consistency
             uint sectorsPerFat = CalculateFat16Sectors(partitionSectors, sectorsPerCluster, reservedSectors, numFats, rootDirEntries);
-            uint dataStartSector = reservedSectors + (numFats * sectorsPerFat) + rootDirSectors;
-            uint totalDataSectors = partitionSectors - dataStartSector;
 
             // Build boot sector
             // Jump instruction to skip BPB
@@ -2662,32 +2969,56 @@ namespace NetImage.Workers
 
         private uint CalculateFat16Sectors(uint totalSectors, byte sectorsPerCluster, uint reservedSectors, byte numFats, uint rootDirEntries)
         {
-            uint bytesPerSector = 512;
-            uint rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
+            return ComputeSectorsPerFat(totalSectors, sectorsPerCluster, reservedSectors, numFats, rootDirEntries, 512);
+        }
 
-            // Iterate to find correct FAT size
-            for (int i = 0; i < 10; i++)
+        /// <summary>
+        /// Computes how many sectors each FAT copy needs by solving the circular dependency between
+        /// the FAT size and the cluster count. The data-cluster count depends on how many sectors the
+        /// FATs occupy, while the FAT size depends on the cluster count, so the scan starts at one
+        /// sector per FAT and grows until the FAT is large enough to store every entry (the data
+        /// clusters plus the two reserved entries, clusters 0 and 1) implied by its own size. The
+        /// required size never increases as the FAT grows, so the first size that already fits is both
+        /// correct and minimal, which guarantees the scan terminates and converges to a stable value.
+        /// Entry width follows the same &lt; 4085 cluster-count threshold used by <see cref="GetFatType"/>
+        /// so a freshly built image is later read back with the matching FAT12/FAT16 interpretation, and
+        /// the total byte count is rounded up to whole sectors.
+        /// </summary>
+        private static uint ComputeSectorsPerFat(
+            uint totalSectors,
+            byte sectorsPerCluster,
+            uint reservedSectors,
+            byte numFats,
+            uint rootDirEntries,
+            uint bytesPerSector)
+        {
+            if (sectorsPerCluster == 0 || numFats == 0 || bytesPerSector == 0)
+                return 1;
+
+            var rootDirSectors = ((rootDirEntries * 32u) + (bytesPerSector - 1u)) / bytesPerSector;
+
+            for (uint sectorsPerFat = 1; sectorsPerFat <= totalSectors; sectorsPerFat++)
             {
-                uint fatSizeIter = (i > 0) ? ((totalSectors - reservedSectors - rootDirSectors) / sectorsPerCluster * 3u / 2 + bytesPerSector - 1) / bytesPerSector : 1;
-                uint dataStartIter = reservedSectors + (numFats * fatSizeIter) + rootDirSectors;
-                uint dataSectorsIter = totalSectors - dataStartIter;
+                var reservedOverhead = (ulong)reservedSectors + rootDirSectors + ((ulong)numFats * sectorsPerFat);
+                var dataSectors = reservedOverhead >= totalSectors ? 0u : (uint)(totalSectors - reservedOverhead);
+                var dataClusters = dataSectors / sectorsPerCluster;
 
-                if (dataSectorsIter <= 0) break;
+                // Include the two reserved entries (clusters 0 and 1). FAT12 packs 12 bits per entry
+                // (1.5 bytes); FAT16 uses a full 16-bit word (2 bytes).
+                var entries = (ulong)dataClusters + 2u;
+                var fatBytes = dataClusters < 4085
+                    ? (entries * 3u + 1u) / 2u   // round 1.5 bytes/entry up to a whole byte
+                    : entries * 2u;              // 2 bytes/entry
 
-                uint clusterCountIter = dataSectorsIter / sectorsPerCluster;
-                uint fatSizeNew = (clusterCountIter * 3u / 2 + bytesPerSector - 1) / bytesPerSector;
+                var needed = (uint)((fatBytes + bytesPerSector - 1u) / bytesPerSector);
+                if (needed == 0)
+                    needed = 1;
 
-                // Check if converged
-                uint nextDataStart = reservedSectors + (numFats * fatSizeNew) + rootDirSectors;
-                if (Math.Abs((long)nextDataStart - (long)dataStartIter) < 2)
-                    return fatSizeNew;
+                if (sectorsPerFat >= needed)
+                    return sectorsPerFat;
             }
 
-            // Fallback calculation
-            uint dataStartFallback = reservedSectors + rootDirSectors;
-            uint dataSectorsFallback = totalSectors - dataStartFallback;
-            uint clusterCountFallback = dataSectorsFallback / sectorsPerCluster;
-            return (clusterCountFallback * 3u / 2 + bytesPerSector - 1) / bytesPerSector;
+            return 1;
         }
 
         private void InitializeFat16(Bpb bpb, uint partitionStart, string volumeLabel)
@@ -2710,15 +3041,8 @@ namespace NetImage.Workers
                 uint fatStartSector = partitionStart + reservedSectors + (fatNum * sectorsPerFat);
                 uint fatOffset = fatStartSector * bytesPerSector;
 
-                // FAT16: First entry is media descriptor + high bits of reserved cluster
-                imageData[fatOffset] = 0xF8;
-                imageData[fatOffset + 1] = 0xFF;
-                imageData[fatOffset + 2] = 0xFF;
-                imageData[fatOffset + 3] = 0x0F;
-
-                // Second entry (cluster 1) marks end of reserved cluster chain
-                imageData[fatOffset + 4] = 0xFF;
-                imageData[fatOffset + 5] = 0x0F;
+                // Reserved FAT16 entries (clusters 0 and 1); data cluster 2 stays free.
+                WriteReservedFat16Entries((int)fatOffset, 0xF8);
             }
 
             // Initialize root directory with volume label
@@ -2746,7 +3070,7 @@ namespace NetImage.Workers
             // Calculate FAT12 parameters
             uint bytesPerSector = 512;
             byte sectorsPerCluster = GetSectorsPerCluster(totalSectors);
-            uint reservedSectors = 3; // Standard for FAT12
+            uint reservedSectors = 1; // Standard for FAT12 floppies
             byte numFats = 2;
             uint rootDirEntries = 224; // Standard for 360KB+ floppies
             uint sectorsPerFat = CalculateSectorsPerFat(totalSectors, sectorsPerCluster);
@@ -2850,21 +3174,12 @@ namespace NetImage.Workers
 
         private uint CalculateSectorsPerFat(uint totalSectors, byte sectorsPerCluster)
         {
-            uint reservedSectors = 3;
-            byte numFats = 2;
-            uint rootDirEntries = 224;
-            uint bytesPerSector = 512;
+            const uint reservedSectors = 1;  // Standard for FAT12 floppies
+            const byte numFats = 2;
+            const uint rootDirEntries = 224; // Standard for 360KB+ floppies
+            const uint bytesPerSector = 512;
 
-            uint rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
-            uint dataStart = reservedSectors + (numFats * 1u) + rootDirSectors; // Start with 1 sector per FAT
-            uint dataSectors = totalSectors - dataStart;
-            uint clusterCount = dataSectors / sectorsPerCluster;
-
-            // FAT12: 1.5 bytes per cluster entry
-            uint fatSectors = ((clusterCount * 3u / 2) + 1) / bytesPerSector;
-            if (fatSectors < 1) fatSectors = 1;
-
-            return fatSectors;
+            return ComputeSectorsPerFat(totalSectors, sectorsPerCluster, reservedSectors, numFats, rootDirEntries, bytesPerSector);
         }
 
         private void InitializeFats(uint sectorsPerFat, uint reservedSectors, byte numFats, uint bytesPerSector, byte mediaDescriptor)
@@ -2882,6 +3197,25 @@ namespace NetImage.Workers
                 imageData[fatOffset + 1] = 0xFF;
                 imageData[fatOffset + 2] = 0xFF;
             }
+        }
+
+        /// <summary>
+        /// Writes the two reserved FAT16 entries at the start of a FAT copy so that image creation
+        /// and formatting can never diverge. Entry[0] holds the media descriptor with its high byte
+        /// forced to 0xFF (e.g. 0xF8 -> 0xFFF8); entry[1] is the reserved end-of-chain marker 0xFFFF.
+        /// Data cluster 2 (entry[2]) is deliberately left untouched so it stays free for allocation.
+        /// </summary>
+        private void WriteReservedFat16Entries(int fatOffset, byte mediaDescriptor)
+        {
+            var imageData = _imageData!;
+
+            // entry[0] = 0xFF00 | media descriptor
+            imageData[fatOffset] = mediaDescriptor;
+            imageData[fatOffset + 1] = 0xFF;
+
+            // entry[1] = 0xFFFF (reserved / end-of-chain)
+            imageData[fatOffset + 2] = 0xFF;
+            imageData[fatOffset + 3] = 0xFF;
         }
 
         private void InitializeRootDirectory(uint rootDirEntries, uint reservedSectors, byte numFats, uint sectorsPerFat, uint bytesPerSector, string volumeLabel)
@@ -2952,14 +3286,8 @@ namespace NetImage.Workers
                 }
                 else
                 {
-                    _imageData[currentFatOffset] = bpb.MediaDescriptor;
-                    _imageData[currentFatOffset + 1] = 0xFF;
-                    _imageData[currentFatOffset + 2] = 0xFF;
-                    _imageData[currentFatOffset + 3] = 0x0F;
-
-                    // FAT16 cluster 1 is end of chain
-                    _imageData[currentFatOffset + 4] = 0xFF;
-                    _imageData[currentFatOffset + 5] = 0x0F;
+                    // Reserved FAT16 entries (clusters 0 and 1); data cluster 2 stays free.
+                    WriteReservedFat16Entries(currentFatOffset, bpb.MediaDescriptor);
                 }
             }
 

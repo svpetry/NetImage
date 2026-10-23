@@ -24,7 +24,7 @@
                     <RadioButton Content="720 KB (512 bytes/sector)" Tag="737280" GroupName="FloppySize"/>
                     <RadioButton Content="1.2 MB (512 bytes/sector)" Tag="1245184" GroupName="FloppySize"/>
                     <RadioButton Content="1.44 MB (512 bytes/sector)" IsChecked="True" Tag="1474560" GroupName="FloppySize"/>
-                    <RadioButton Content="2.88 MB (512 bytes/sector)" Tag="3006476" GroupName="FloppySize"/>
+                    <RadioButton Content="2.88 MB (512 bytes/sector)" Tag="2949120" GroupName="FloppySize"/>
                 </StackPanel>
             </TabItem>
 

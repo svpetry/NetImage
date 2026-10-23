@@ -481,6 +481,7 @@ namespace NetImage.Views
                 vm.AboutRequested += OnAboutRequested;
                 vm.CreateFolderError += OnCreateFolderError;
                 vm.AddError += OnAddError;
+                vm.NewImageError += OnNewImageError;
                 vm.DeleteError += OnDeleteError;
                 vm.ExtractError += OnExtractError;
                 vm.SaveError += OnSaveError;
@@ -508,6 +509,7 @@ namespace NetImage.Views
                     oldVm.AboutRequested -= OnAboutRequested;
                     oldVm.CreateFolderError -= OnCreateFolderError;
                     oldVm.AddError -= OnAddError;
+                    oldVm.NewImageError -= OnNewImageError;
                     oldVm.DeleteError -= OnDeleteError;
                     oldVm.ExtractError -= OnExtractError;
                     oldVm.SaveError -= OnSaveError;
@@ -525,6 +527,7 @@ namespace NetImage.Views
                     newVm.AboutRequested += OnAboutRequested;
                     newVm.CreateFolderError += OnCreateFolderError;
                     newVm.AddError += OnAddError;
+                    newVm.NewImageError += OnNewImageError;
                     newVm.DeleteError += OnDeleteError;
                     newVm.ExtractError += OnExtractError;
                     newVm.SaveError += OnSaveError;
@@ -683,6 +686,11 @@ namespace NetImage.Views
         }
 
         private void OnAddError(object? sender, string message)
+        {
+            MessageBox.Show(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+
+        private void OnNewImageError(object? sender, string message)
         {
             MessageBox.Show(message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
