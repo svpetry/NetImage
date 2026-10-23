@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -27,8 +28,29 @@ namespace NetImage.Tests.Workers
         {
             if (_tempDirectory != null && Directory.Exists(_tempDirectory))
             {
-                Directory.Delete(_tempDirectory, true);
+                ForceDeleteDirectory(_tempDirectory);
             }
+        }
+
+        /// <summary>
+        /// Recursively deletes a directory without ever descending into junctions or symbolic links, so cleanup of
+        /// tests that create reparse points cannot damage (or be blocked by) the link targets.
+        /// </summary>
+        private static void ForceDeleteDirectory(string path)
+        {
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            {
+                Directory.Delete(path);
+                return;
+            }
+
+            foreach (var directory in Directory.GetDirectories(path))
+                ForceDeleteDirectory(directory);
+
+            foreach (var file in Directory.GetFiles(path))
+                File.Delete(file);
+
+            Directory.Delete(path);
         }
 
         #region Constructor and Property Tests
@@ -2543,6 +2565,407 @@ namespace NetImage.Tests.Workers
             }
 
             return shortNames;
+        }
+
+        #endregion
+
+        #region Extraction Reparse-Point Containment (Follow-up Issue #1)
+
+        [Test]
+        public async Task ExtractFolder_WithJunctionAncestor_DoesNotWriteOutsideDestination()
+        {
+            // Arrange - sibling host folders: the chosen destination "extract" and an "outside" folder holding a file
+            // that must never be touched. A directory junction makes extract\LINK resolve into outside\.
+            var outside = Path.Combine(_tempDirectory!, "outside");
+            var extract = Path.Combine(_tempDirectory!, "extract");
+            Directory.CreateDirectory(outside);
+            Directory.CreateDirectory(extract);
+
+            var outsideFile = Path.Combine(outside, "KEEP.TXT");
+            File.WriteAllBytes(outsideFile, Encoding.ASCII.GetBytes("original"));
+
+            CreateJunctionOrIgnore(Path.Combine(extract, "LINK"), outside);
+
+            // An image containing folder LINK and file LINK\KEEP.TXT whose contents would overwrite the outside file.
+            var filePath = Path.Combine(_tempDirectory!, "junction.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "LINK");
+            worker.AddFile("LINK", "KEEP.TXT", Encoding.ASCII.GetBytes("changed"));
+            await worker.SaveAsync(filePath);
+
+            var evil = new DiskImageWorker(filePath);
+            await evil.OpenAsync();
+
+            // Act
+            evil.ExtractFolder(string.Empty, extract);
+
+            // Assert - the file living outside the chosen destination is byte-for-byte unchanged.
+            Assert.That(File.ReadAllBytes(outsideFile), Is.EqualTo(Encoding.ASCII.GetBytes("original")));
+        }
+
+        [Test]
+        public async Task ExtractFolder_WithRedirectedFinalFileTarget_DoesNotOverwriteOutsideFile()
+        {
+            // Arrange - extract\target.txt is a symbolic link pointing at outside\real.txt.
+            var outside = Path.Combine(_tempDirectory!, "outside");
+            var extract = Path.Combine(_tempDirectory!, "extract");
+            Directory.CreateDirectory(outside);
+            Directory.CreateDirectory(extract);
+
+            var outsideFile = Path.Combine(outside, "real.txt");
+            File.WriteAllBytes(outsideFile, Encoding.ASCII.GetBytes("original"));
+
+            CreateSymbolicLinkFileOrIgnore(Path.Combine(extract, "target.txt"), outsideFile);
+
+            var filePath = Path.Combine(_tempDirectory!, "symlink.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.AddFile("target.txt", Encoding.ASCII.GetBytes("changed"));
+            await worker.SaveAsync(filePath);
+
+            var evil = new DiskImageWorker(filePath);
+            await evil.OpenAsync();
+
+            // Act
+            evil.ExtractFolder(string.Empty, extract);
+
+            // Assert - the linked target outside the destination keeps its original bytes.
+            Assert.That(File.ReadAllBytes(outsideFile), Is.EqualTo(Encoding.ASCII.GetBytes("original")));
+        }
+
+        private static void CreateJunctionOrIgnore(string linkPath, string targetDirectory)
+        {
+            var exitCode = RunCmd($"/c mklink /J \"{linkPath}\" \"{targetDirectory}\"");
+            if (exitCode != 0)
+                Assert.Ignore("Unable to create a directory junction in this environment.");
+        }
+
+        private static void CreateSymbolicLinkFileOrIgnore(string linkPath, string targetFile)
+        {
+            var exitCode = RunCmd($"/c mklink \"{linkPath}\" \"{targetFile}\"");
+            if (exitCode != 0)
+                Assert.Ignore("Unable to create a symbolic link (requires developer mode or elevation) in this environment.");
+        }
+
+        private static int RunCmd(string arguments)
+        {
+            var startInfo = new ProcessStartInfo("cmd.exe", arguments)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(startInfo);
+            if (process == null)
+                return -1;
+
+            process.WaitForExit(15000);
+            return process.HasExited ? process.ExitCode : -1;
+        }
+
+        #endregion
+
+        #region Directory Growth And Transactional Moves (Follow-up Issues #2 and #3)
+
+        [Test]
+        public async Task MoveEntry_IntoDirectoryWithOneTrailingSlot_GrowsDirectoryAndKeepsFileAccessible()
+        {
+            // Arrange - DOCS fills its first cluster leaving exactly one empty trailing slot, so the two-entry chain
+            // for keep.txt (LFN + short) cannot fit and the directory must grow into a fresh cluster.
+            var filePath = Path.Combine(_tempDirectory!, "move-grow.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "DOCS");
+
+            for (var i = 0; i < 13; i++)
+                worker.AddFile("DOCS", $"F{i:D2}.TXT", Array.Empty<byte>());
+
+            var keepContent = new byte[] { 1, 2, 3 };
+            worker.AddFile("keep.txt", keepContent);
+
+            // Act - the move used to write into a hidden cluster and then delete the source, losing the file.
+            worker.MoveEntry("keep.txt", "DOCS");
+            await worker.SaveAsync(filePath);
+
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain(@"DOCS\keep.txt"), "the moved file must be discoverable after growth");
+                Assert.That(reopened.GetFileContent(@"DOCS\keep.txt"), Is.EqualTo(keepContent));
+                Assert.That(paths, Does.Not.Contain("keep.txt"), "the source entry must be gone");
+                Assert.That(paths.Count(p => Path.GetFileName(p).Equals("keep.txt", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(1));
+
+                // Unrelated neighbours survived the growth untouched.
+                Assert.That(paths, Does.Contain(@"DOCS\F00.TXT"));
+                Assert.That(paths, Does.Contain(@"DOCS\F12.TXT"));
+            });
+        }
+
+        [Test]
+        public async Task AddFile_IntoDirectoryWithOneTrailingSlot_GrowsDirectoryAndKeepsFileAccessible()
+        {
+            // Arrange - same one-trailing-slot layout, but adding directly instead of moving.
+            var filePath = Path.Combine(_tempDirectory!, "add-grow.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "DOCS");
+
+            for (var i = 0; i < 13; i++)
+                worker.AddFile("DOCS", $"F{i:D2}.TXT", Array.Empty<byte>());
+
+            var content = Encoding.ASCII.GetBytes("payload stored in lower.txt");
+
+            // Act
+            worker.AddFile("DOCS", "lower.txt", content);
+            await worker.SaveAsync(filePath);
+
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain(@"DOCS\lower.txt"), "the added file must be discoverable after growth");
+                Assert.That(reopened.GetFileContent(@"DOCS\lower.txt"), Is.EqualTo(content));
+                Assert.That(paths.Count(p => Path.GetFileName(p).Equals("lower.txt", StringComparison.OrdinalIgnoreCase)), Is.EqualTo(1));
+                Assert.That(paths, Does.Contain(@"DOCS\F12.TXT"));
+            });
+        }
+
+        [Test]
+        public async Task AddFile_WithVeryLongName_GrowsDirectoryAcrossMultipleClusters()
+        {
+            // Arrange - a 200-character name needs 16 LFN entries plus the short entry = 17 slots, more than a single
+            // 512-byte cluster (16 entries) can hold, so growth must append enough clusters and roll nothing back.
+            var filePath = Path.Combine(_tempDirectory!, "huge-name.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "DOCS");
+
+            var longName = new string('a', 196) + ".txt";
+            var content = new byte[] { 1 };
+
+            // Act
+            worker.AddFile("DOCS", longName, content);
+
+            var image = worker.GetImageData()!;
+            var directoryClusters = ReadFat12ClusterChain(image, FindRootDirectoryEntryCluster(image, "DOCS"));
+            Assert.That(directoryClusters, Has.Count.GreaterThanOrEqualTo(2), "the name needs more than one directory cluster");
+
+            await worker.SaveAsync(filePath);
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reopened.FilesAndFolders.Select(f => f.Path), Does.Contain($@"DOCS\{longName}"));
+                Assert.That(reopened.GetFileContent($@"DOCS\{longName}"), Is.EqualTo(content));
+            });
+        }
+
+        [Test]
+        public void AddFile_WithVeryLongName_WhenAllocationFailsDuringGrowth_RollsBackAllAllocations()
+        {
+            // Arrange - fill the disk down to a single free cluster. A very long name needs one cluster for its content
+            // and at least one more to extend the DOCS directory, so directory growth must fail partway through.
+            var worker = new DiskImageWorker("huge-name-fail.img");
+            worker.CreateBlankImage(1_474_560, "DISK");
+            worker.CreateFolder(string.Empty, "DOCS");
+
+            // The 1.44 MB blank uses 512-byte clusters; consume every free cluster but one with a single filler file.
+            var filler = new byte[worker.GetFreeBytes() - SectorSize];
+            worker.AddFile(string.Empty, "FILLER.BIN", filler);
+
+            var freeBefore = worker.GetFreeBytes();
+            Assert.That(freeBefore, Is.EqualTo(SectorSize));
+
+            var longName = new string('a', 196) + ".txt";
+
+            // Act / Assert
+            Assert.Throws<InvalidOperationException>(() => worker.AddFile("DOCS", longName, new byte[] { 1 }));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBefore), "a failed growth must free every cluster it took");
+                Assert.That(worker.FilesAndFolders.Select(f => f.Path), Does.Not.Contain($@"DOCS\{longName}"));
+                Assert.That(worker.FilesAndFolders.Any(f => Path.GetFileName(f.Path).Equals(longName, StringComparison.OrdinalIgnoreCase)), Is.False);
+            });
+        }
+
+        #endregion
+
+        #region Unicode Short-Name Aliases (Follow-up Issue #4)
+
+        [Test]
+        public async Task AddFile_WithUnicodeNames_GetsDistinctAliasesAndValidChecksums()
+        {
+            // Arrange - two distinct single-CJK-character names. Their ASCII short aliases must differ on disk and their
+            // LFN checksums must be computed over the same bytes actually written, or the reader would reject both long
+            // names and show only an identical (broken) short alias.
+            var filePath = Path.Combine(_tempDirectory!, "unicode-alias.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateBlankImage(1_474_560, "DISK");
+
+            const string oneName = "\u4E2D.txt";
+            const string twoName = "\u4F2D.txt";
+            var oneContent = Encoding.ASCII.GetBytes("ONE");
+            var twoContent = Encoding.ASCII.GetBytes("TWO-DIFFERENT");
+
+            // Act
+            worker.AddFile(oneName, oneContent);
+            worker.AddFile(twoName, twoContent);
+
+            var image = worker.GetImageData()!;
+            var shortNames = ReadRootDirectoryShortNames(image);
+            Assert.Multiple(() =>
+            {
+                Assert.That(shortNames, Has.Count.EqualTo(2));
+                Assert.That(shortNames.Distinct(StringComparer.OrdinalIgnoreCase).Count(), Is.EqualTo(2),
+                    "the two unicode names must produce distinct on-disk short aliases");
+            });
+
+            await worker.SaveAsync(filePath);
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+            var paths = reopened.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(paths, Does.Contain(oneName), "valid LFN checksum keeps the original unicode name readable");
+                Assert.That(paths, Does.Contain(twoName));
+                Assert.That(reopened.GetFileContent(oneName), Is.EqualTo(oneContent));
+                Assert.That(reopened.GetFileContent(twoName), Is.EqualTo(twoContent));
+            });
+
+            // Rename through the unicode path exercises the same shared alias/checksum encoder.
+            const string renamedName = "\u4E09.txt";
+            reopened.RenameEntry(twoName, renamedName);
+            await reopened.SaveAsync(filePath);
+
+            var verify = new DiskImageWorker(filePath);
+            await verify.OpenAsync();
+            var verifyPaths = verify.FilesAndFolders.Select(f => f.Path).ToList();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(verifyPaths, Does.Contain(renamedName));
+                Assert.That(verifyPaths, Does.Not.Contain(twoName));
+                Assert.That(verify.GetFileContent(renamedName), Is.EqualTo(twoContent));
+            });
+        }
+
+        #endregion
+
+        #region Hard-Disk FAT Type Consistency (Follow-up Issue #5)
+
+        [TestCase(64u, 4u, 63u, DiskImageWorker.FatType.Fat12)]
+        [TestCase(128u, 4u, 63u, DiskImageWorker.FatType.Fat16)]
+        [TestCase(1024u, 4u, 63u, DiskImageWorker.FatType.Fat16)]
+        public async Task CreateHardDiskImage_UsesOneFatTypeConsistentlyAcrossSizingInitAndReopen(uint cylinders, uint heads, uint sectorsPerTrack, DiskImageWorker.FatType expected)
+        {
+            // Arrange / Act
+            var filePath = Path.Combine(_tempDirectory!, $"hd-{cylinders}-{heads}-{sectorsPerTrack}.img");
+            var worker = new DiskImageWorker(filePath);
+            worker.CreateHardDiskImage(cylinders, heads, sectorsPerTrack, "DISK");
+
+            Assert.That(worker.FilesystemType, Is.EqualTo(expected), "creation must report the type its cluster count implies");
+
+            var image = worker.GetImageData()!;
+            var partitionStart = worker.GetPartitionStartSector();
+
+            // Reserved entries match the reported type and data cluster 2 is free in every FAT copy.
+            AssertHardDiskReservedEntries(image, partitionStart, expected);
+
+            // MBR partition type byte must agree with the filesystem that was actually written.
+            var mbrType = image[446 + 4];
+            if (expected == DiskImageWorker.FatType.Fat12)
+                Assert.That(mbrType, Is.EqualTo((byte)0x01));
+            else
+                Assert.That(mbrType, Is.EqualTo((byte)0x06).Or.EqualTo((byte)0x0E));
+
+            // No orphaned cluster: a fresh image reports its whole capacity free.
+            Assert.That(worker.GetFreeBytes(), Is.EqualTo(worker.GetTotalBytes()));
+
+            // Reopening must classify the identical type.
+            await worker.SaveAsync(filePath);
+            var reopened = new DiskImageWorker(filePath);
+            await reopened.OpenAsync();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reopened.FilesystemType, Is.EqualTo(expected), "reopened type must match the created type");
+                Assert.That(reopened.GetFreeBytes(), Is.EqualTo(reopened.GetTotalBytes()), "reopened image must show no orphan cluster");
+            });
+        }
+
+        [Test]
+        public void FormatImage_SmallHardDisk_KeepsTypeAndFreeSpaceStable()
+        {
+            // Arrange - a small geometry created as FAT12. Before the fix creation wrote FAT16 reserved entries that,
+            // read back as FAT12, marked cluster 2 allocated, so format changed the reported free space by one cluster.
+            var worker = new DiskImageWorker("hd-format.img");
+            worker.CreateHardDiskImage(64, 4, 63, "DISK");
+            var typeBefore = worker.FilesystemType;
+            var freeBefore = worker.GetFreeBytes();
+
+            worker.AddFile("OLD.TXT", new byte[] { 1, 2 });
+
+            // Act
+            worker.FormatImage();
+
+            // Assert - format returns to exactly the state creation produced: same type and identical free space.
+            Assert.Multiple(() =>
+            {
+                Assert.That(worker.FilesystemType, Is.EqualTo(typeBefore));
+                Assert.That(worker.GetFreeBytes(), Is.EqualTo(freeBefore), "creation and format must agree on free clusters");
+                Assert.That(worker.GetFreeBytes(), Is.EqualTo(worker.GetTotalBytes()));
+            });
+
+            AssertHardDiskReservedEntries(worker.GetImageData()!, worker.GetPartitionStartSector(), typeBefore!.Value);
+        }
+
+        private static uint ReadFat12EntryAt(byte[] image, int fatBase, uint cluster)
+        {
+            var entryOffset = fatBase + (int)(cluster * 3 / 2);
+            var raw = (ushort)(image[entryOffset] | (image[entryOffset + 1] << 8));
+            return cluster % 2 == 0 ? (uint)(raw & 0x0FFF) : (uint)(raw >> 4);
+        }
+
+        private static void AssertHardDiskReservedEntries(byte[] image, uint partitionStart, DiskImageWorker.FatType type)
+        {
+            var boot = (int)partitionStart * SectorSize;
+            var bytesPerSector = BitConverter.ToUInt16(image, boot + 11);
+            var reservedSectors = BitConverter.ToUInt16(image, boot + 14);
+            byte numFats = image[boot + 16];
+            var sectorsPerFat = BitConverter.ToUInt16(image, boot + 22);
+            var media = image[boot + 21];
+
+            for (var fat = 0; fat < numFats; fat++)
+            {
+                var fatBase = (int)((partitionStart + reservedSectors + (uint)(fat * sectorsPerFat)) * bytesPerSector);
+
+                if (type == DiskImageWorker.FatType.Fat16)
+                {
+                    var e0 = ReadFat16Entry(image, fatBase, 0);
+                    Assert.That((byte)(e0 & 0xFF), Is.EqualTo(media), $"FAT{fat} entry[0] low byte must be the media descriptor");
+                    Assert.That((byte)(e0 >> 8), Is.EqualTo(0xFF), $"FAT{fat} entry[0] high byte must be 0xFF");
+                    Assert.That(ReadFat16Entry(image, fatBase, 1), Is.EqualTo((ushort)0xFFFF), $"FAT{fat} entry[1] must be end-of-chain");
+                    Assert.That(ReadFat16Entry(image, fatBase, 2), Is.EqualTo((ushort)0x0000), $"FAT{fat} cluster 2 must be free");
+                }
+                else
+                {
+                    var e0 = ReadFat12EntryAt(image, fatBase, 0);
+                    Assert.That((byte)(e0 & 0xFF), Is.EqualTo(media), $"FAT{fat} FAT12 entry[0] low byte must be the media descriptor");
+                    Assert.That(ReadFat12EntryAt(image, fatBase, 1), Is.GreaterThanOrEqualTo((uint)0x0FF8), $"FAT{fat} FAT12 entry[1] must be end-of-chain");
+                    Assert.That(ReadFat12EntryAt(image, fatBase, 2), Is.EqualTo((uint)0x0000), $"FAT{fat} FAT12 cluster 2 must be free");
+                }
+            }
         }
 
         #endregion

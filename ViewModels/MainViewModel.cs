@@ -945,10 +945,8 @@ namespace NetImage.ViewModels
                                     var content = worker.GetFileContent(item.Path);
                                     if (content != null)
                                     {
-                                        var destFullPath = DiskImageWorker.ResolveSafeDestinationPath(destPath, item.Name);
-                                        if (destFullPath == null)
+                                        if (!DiskImageWorker.TryWriteFileWithinRoot(destPath, item.Name, content))
                                             continue;
-                                        System.IO.File.WriteAllBytes(destFullPath, content);
                                         totalBytes += content.Length;
                                     }
                                 }
@@ -1065,10 +1063,7 @@ namespace NetImage.ViewModels
                                     var content = await Task.Run(() => worker.GetFileContent(item.Path));
                                     if (content != null)
                                     {
-                                        var destFullPath = DiskImageWorker.ResolveSafeDestinationPath(destPath, item.Name);
-                                        if (destFullPath == null)
-                                            continue;
-                                        await Task.Run(() => System.IO.File.WriteAllBytes(destFullPath, content));
+                                        await Task.Run(() => DiskImageWorker.TryWriteFileWithinRoot(destPath, item.Name, content));
                                     }
                                 }
                             },

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using NetImage.Models;
+using NetImage.Utils;
 
 namespace NetImage.Workers
 {
@@ -633,27 +634,6 @@ namespace NetImage.Workers
         }
 
         /// <summary>
-        /// Resolves a run of <paramref name="count"/> consecutive directory entries starting at
-        /// <paramref name="startIndex"/>, following the directory's cluster chain wherever the run crosses a
-        /// cluster boundary.
-        /// </summary>
-        private List<int> GetDirectoryEntryOffsets(DirectoryLocation directory, int startIndex, int count, Bpb bpb)
-        {
-            var offsets = new List<int>(count);
-
-            for (int i = 0; i < count; i++)
-            {
-                var offset = GetDirectoryEntryOffset(directory, startIndex + i, bpb);
-                if (offset < 0)
-                    throw new InvalidOperationException("Directory entry chain does not cover the required directory entries.");
-
-                offsets.Add(offset);
-            }
-
-            return offsets;
-        }
-
-        /// <summary>
         /// Maps a physical directory-entry offset back to its index inside the directory, so neighbouring entries
         /// can be resolved through the cluster chain instead of by simple byte arithmetic.
         /// Returns -1 when the offset does not belong to the directory.
@@ -1017,7 +997,10 @@ namespace NetImage.Workers
         }
 
         /// <summary>
-        /// Encodes a filename to FAT 8.3 format (uppercase, space-padded).
+        /// Encodes a filename into the ASCII 8.3 short-alias form written to disk: each character is upper-cased and
+        /// mapped to a representable FAT character (anything illegal or non-ASCII becomes '_'), so the produced alias
+        /// is pure ASCII. This makes the same bytes usable for alias collision checks, LFN checksums and short-entry
+        /// writes; the original (possibly Unicode) name is preserved separately in the LFN entries.
         /// </summary>
         private static string EncodeFileName(string fileName)
         {
@@ -1034,17 +1017,56 @@ namespace NetImage.Workers
                 extPart = "";
             }
 
-            // Truncate or pad name part to 8 characters
-            if (namePart.Length > 8)
-                namePart = namePart.Substring(0, 8);
-            namePart = namePart.PadRight(8, ' ').ToUpperInvariant();
+            return SanitizeFatPart(namePart, 8) + SanitizeFatPart(extPart, 3);
+        }
 
-            // Truncate or pad extension to 3 characters
-            if (extPart.Length > 3)
-                extPart = extPart.Substring(0, 3);
-            extPart = extPart.PadRight(3, ' ').ToUpperInvariant();
+        /// <summary>
+        /// Maps a raw name/extension segment to its ASCII FAT short representation: characters are upper-cased and any
+        /// character that is not legal in an 8.3 name (including all non-ASCII characters) is replaced with '_', then
+        /// the result is truncated to <paramref name="maxLength"/> and space padded.
+        /// </summary>
+        private static string SanitizeFatPart(string part, int maxLength)
+        {
+            var chars = new char[maxLength];
+            var length = 0;
 
-            return namePart + extPart;
+            foreach (var c in part)
+            {
+                if (length == maxLength)
+                    break;
+
+                chars[length++] = MapToFatChar(c);
+            }
+
+            return new string(chars, 0, length).PadRight(maxLength, ' ');
+        }
+
+        private static char MapToFatChar(char value)
+        {
+            var c = char.ToUpperInvariant(value);
+
+            if (c is >= '0' and <= '9')
+                return c;
+            if (c is >= 'A' and <= 'Z')
+                return c;
+            if ("!#$%&'()-@^_`{}".IndexOf(c) >= 0)
+                return c;
+
+            return '_';
+        }
+
+        /// <summary>
+        /// Encodes an 8.3 short name (the padded string produced by <see cref="EncodeFileName"/>) into the exact 11 bytes
+        /// stored in a directory entry. The same bytes are used for alias collision comparisons, LFN checksums and short
+        /// entry writes so the three representations can never diverge.
+        /// </summary>
+        private static byte[] EncodeShortNameBytes(string shortName)
+        {
+            var padded = shortName.PadRight(11);
+            if (padded.Length > 11)
+                padded = padded.Substring(0, 11);
+
+            return System.Text.Encoding.ASCII.GetBytes(padded);
         }
 
         /// <summary>
@@ -1236,6 +1258,34 @@ namespace NetImage.Workers
             return fullDestination;
         }
 
+        /// <summary>
+        /// Safely creates an extraction directory for an image path under <paramref name="destinationRoot"/>, refusing
+        /// to write into any location that resolves through a junction, symlink or other reparse point. Returns false
+        /// (without writing outside the safe prefix) when the destination is unsafe.
+        /// </summary>
+        public static bool TryCreateDirectoryWithinRoot(string destinationRoot, string imageRelativePath)
+        {
+            var fullDestination = ResolveSafeDestinationPath(destinationRoot, imageRelativePath);
+            if (fullDestination == null)
+                return false;
+
+            return SafeExtraction.TryCreateDirectoryWithinRoot(System.IO.Path.GetFullPath(destinationRoot), fullDestination);
+        }
+
+        /// <summary>
+        /// Safely writes extracted file bytes for an image path under <paramref name="destinationRoot"/>, creating any
+        /// missing parent directories and refusing to follow reparse points in ancestors or the final target. Returns
+        /// false (leaving existing outside files untouched) when the destination is unsafe.
+        /// </summary>
+        public static bool TryWriteFileWithinRoot(string destinationRoot, string imageRelativePath, byte[] content, DateTime? lastWriteTime = null)
+        {
+            var fullDestination = ResolveSafeDestinationPath(destinationRoot, imageRelativePath);
+            if (fullDestination == null)
+                return false;
+
+            return SafeExtraction.TryWriteAllBytesWithinRoot(System.IO.Path.GetFullPath(destinationRoot), fullDestination, content, lastWriteTime);
+        }
+
         public void ExtractFolder(string sourcePath, string hostDestinationPath)
             => ExtractFolderInternal(sourcePath, hostDestinationPath, null);
 
@@ -1266,13 +1316,10 @@ namespace NetImage.Workers
             foreach (var item in entriesToExtract)
             {
                 var entry = item.Entry;
-                var destFullPath = ResolveSafeDestinationPath(hostDestinationPath, item.RelativePath);
-                if (destFullPath == null)
-                    continue;
 
                 if (entry.Size == null)
                 {
-                    System.IO.Directory.CreateDirectory(destFullPath);
+                    TryCreateDirectoryWithinRoot(hostDestinationPath, item.RelativePath);
                     continue;
                 }
 
@@ -1281,19 +1328,10 @@ namespace NetImage.Workers
                 var content = GetFileContent(entry.Path);
                 if (content != null)
                 {
-                    var parentDir = System.IO.Path.GetDirectoryName(destFullPath);
-                    if (parentDir != null && !System.IO.Directory.Exists(parentDir))
-                        System.IO.Directory.CreateDirectory(parentDir);
-
-                    System.IO.File.WriteAllBytes(destFullPath, content);
-
-                    if (entry.Modified.HasValue)
-                    {
-                        System.IO.File.SetLastWriteTime(destFullPath, entry.Modified.Value);
-                    }
+                    TryWriteFileWithinRoot(hostDestinationPath, item.RelativePath, content, entry.Modified);
+                    extractedBytes += entry.Size ?? 0L;
                 }
 
-                extractedBytes += entry.Size ?? 0L;
                 progress?.Report(new OperationProgress(extractedBytes, totalBytes, item.RelativePath));
             }
         }
@@ -1880,37 +1918,70 @@ namespace NetImage.Workers
         }
 
         /// <summary>
-        /// Scans a directory for a run of <paramref name="count"/> consecutive free (empty or deleted) entry slots,
-        /// following the same rules <see cref="CreateDirectoryEntry"/> uses. On success the offsets of the run are
-        /// returned in <paramref name="freeEntryOffsets"/> as the real entry offsets reported by the chain-aware
-        /// enumerator, because consecutive directory entries can live in different, non-adjacent clusters.
+        /// Scans a directory for the first run of <paramref name="count"/> consecutive free entry slots (empty 0x00 or
+        /// deleted 0xE5), following the directory's real cluster chain so a run may straddle a cluster boundary. Any
+        /// other slot - a live short entry or an LFN fragment - terminates the current run. On success the offsets of
+        /// the run are returned in <paramref name="runOffsets"/> as the real, chain-resolved entry positions.
         /// </summary>
-        private bool TryFindFreeEntryRun(DirectoryLocation directory, int count, Bpb bpb, List<int> freeEntryOffsets)
+        private bool TryFindContiguousFreeEntryRun(DirectoryLocation directory, int count, Bpb bpb, out List<int> runOffsets)
         {
             var imageData = _imageData!;
+            var run = new List<int>(count);
 
             foreach (var offset in EnumerateDirectoryEntryOffsets(directory, bpb))
             {
-                var entry = imageData.AsSpan(offset, 32);
-                var firstByte = entry[0];
+                var firstByte = imageData[offset];
 
                 if (firstByte == 0x00 || firstByte == 0xE5)
                 {
-                    // Found a free entry (empty or deleted)
-                    freeEntryOffsets.Add(offset);
-
-                    if (freeEntryOffsets.Count >= count)
+                    run.Add(offset);
+                    if (run.Count == count)
+                    {
+                        runOffsets = run;
                         return true;
+                    }
                 }
                 else
                 {
-                    // Active entry - reset the run unless this is an LFN entry (which can be reused)
-                    if (!IsLfNEntry(entry))
-                        freeEntryOffsets.Clear();
+                    run.Clear();
                 }
             }
 
+            runOffsets = new List<int>();
             return false;
+        }
+
+        /// <summary>
+        /// Returns the last cluster of a directory/file chain, or 0 when the chain is empty/invalid.
+        /// </summary>
+        private uint GetLastClusterInChain(uint firstCluster, Bpb bpb)
+        {
+            var last = 0u;
+            foreach (var cluster in EnumerateClusterChain(firstCluster, bpb))
+                last = cluster;
+
+            return last;
+        }
+
+        /// <summary>
+        /// Guarantees a valid end-of-directory marker immediately after <paramref name="lastEntryOffset"/>. When the
+        /// following slot is free (0x00 or 0xE5) it is normalised to a single 0x00 sentinel; when the directory is
+        /// exactly full the caller leaves the chain end as-is (readers stop there).
+        /// </summary>
+        private void EnsureEndOfDirectoryMarker(DirectoryLocation directory, int lastEntryOffset, Bpb bpb)
+        {
+            var imageData = _imageData!;
+            var index = GetDirectoryEntryIndex(directory, lastEntryOffset, bpb);
+            if (index < 0)
+                return;
+
+            var nextOffset = GetDirectoryEntryOffset(directory, index + 1, bpb);
+            if (nextOffset < 0)
+                return;
+
+            var firstByte = imageData[nextOffset];
+            if (firstByte == 0x00 || firstByte == 0xE5)
+                imageData[nextOffset] = 0x00;
         }
 
         /// <summary>
@@ -1981,23 +2052,69 @@ namespace NetImage.Workers
             // written into the short entry so every distinct long name round-trips with its own bytes.
             var shortName = GenerateUniqueShortName(fileName, CollectShortNames(directory, bpb));
 
-            // Find free entries. The run is collected as the real entry offsets reported by the chain-aware
-            // enumerator, because consecutive directory entries can live in different, non-adjacent clusters.
-            var freeEntryOffsets = new List<int>(totalEntriesNeeded);
-            if (TryFindFreeEntryRun(directory, totalEntriesNeeded, bpb, freeEntryOffsets))
+            // Allocate the entry chain transactionally. The free run may straddle the directory's existing cluster
+            // boundary and, when the trailing free slots are not enough, grow into freshly appended clusters - the
+            // old terminal 0x00 slot is overwritten in place so nothing ever hides the newly written entries behind a
+            // premature end-of-directory marker. Any failure rolls back both the directory bytes and any appended
+            // clusters/FAT links so the caller's source entry (for a move) and free space are preserved.
+            var appendedClusters = new List<uint>();
+            uint originalLastCluster = 0;
+            bool haveOriginalLast = false;
+            List<int>? runOffsets = null;
+            Dictionary<int, byte[]>? originalBytes = null;
+
+            try
             {
-                // Found enough consecutive free entries
-                WriteEntryChain(freeEntryOffsets, fileName, shortName, fileSize, firstCluster, isDirectory, lfnEntriesNeeded);
-                return;
+                while (true)
+                {
+                    if (TryFindContiguousFreeEntryRun(directory, totalEntriesNeeded, bpb, out runOffsets))
+                        break;
+
+                    if (directory.FirstCluster == 0)
+                        throw new InvalidOperationException("No free directory entries available.");
+
+                    if (!haveOriginalLast)
+                    {
+                        originalLastCluster = GetLastClusterInChain(directory.FirstCluster, bpb);
+                        haveOriginalLast = true;
+                    }
+
+                    appendedClusters.Add(ExpandDirectory(directory, bpb));
+                }
+
+                // Snapshot the slots we are about to overwrite so a failure restores the directory byte-for-byte.
+                originalBytes = new Dictionary<int, byte[]>(runOffsets.Count);
+                foreach (var offset in runOffsets)
+                {
+                    var saved = new byte[32];
+                    Array.Copy(_imageData!, offset, saved, 0, 32);
+                    originalBytes[offset] = saved;
+                }
+
+                WriteEntryChain(runOffsets, fileName, shortName, fileSize, firstCluster, isDirectory, lfnEntriesNeeded);
+                EnsureEndOfDirectoryMarker(directory, runOffsets[^1], bpb);
             }
+            catch
+            {
+                if (originalBytes != null)
+                {
+                    foreach (var pair in originalBytes)
+                        Array.Copy(pair.Value, 0, _imageData!, pair.Key, 32);
+                }
 
-            if (directory.FirstCluster == 0)
-                throw new InvalidOperationException("No free directory entries available.");
+                if (appendedClusters.Count > 0)
+                {
+                    SetFatEntry(originalLastCluster, GetEndOfChainMarker(bpb), bpb);
 
-            // Expand directory and use the fresh cluster, which is empty from the start.
-            var expandedCluster = ExpandDirectory(directory, bpb);
-            var expandedOffsets = GetDirectoryEntryOffsets(GetSubdirectoryLocation(expandedCluster, bpb), 0, totalEntriesNeeded, bpb);
-            WriteEntryChain(expandedOffsets, fileName, shortName, fileSize, firstCluster, isDirectory, lfnEntriesNeeded);
+                    foreach (var cluster in appendedClusters)
+                    {
+                        SetFatEntry(cluster, 0, bpb);
+                        _nextFreeCluster = Math.Min(_nextFreeCluster, cluster);
+                    }
+                }
+
+                throw;
+            }
         }
 
         /// <summary>
@@ -2055,7 +2172,7 @@ namespace NetImage.Workers
             if (lfnEntriesNeeded > 0)
             {
                 // Write LFN entries first
-                var shortNameBytes = System.Text.Encoding.ASCII.GetBytes(shortName);
+                var shortNameBytes = EncodeShortNameBytes(shortName);
                 WriteLfNEntries(entryOffsets, fileName, shortNameBytes, lfnEntriesNeeded);
 
                 // Write short name entry after LFN entries
@@ -2174,9 +2291,10 @@ namespace NetImage.Workers
 
             Array.Clear(imageData, offset, 32);
 
-            for (int j = 0; j < 11 && j < fileName.Length; j++)
+            var nameBytes = EncodeShortNameBytes(fileName);
+            for (int j = 0; j < 11; j++)
             {
-                imageData[offset + j] = (byte)fileName[j];
+                imageData[offset + j] = nameBytes[j];
             }
 
             imageData[offset + 11] = isDirectory ? (byte)0x10 : (byte)0x00;
@@ -2371,30 +2489,14 @@ namespace NetImage.Workers
             // when the destination already holds an entry with the same readable or short name.
             ThrowIfNameCollision(targetDir, fileName, bpb);
 
-            // The destination must be able to hold every entry the moved name needs, LFN entries included.
-            int lfnEntriesNeeded = NeedsLfNEntry(fileName) ? GetLfnEntryCount(fileName) : 0;
-            var freeSlotOffsets = new List<int>(lfnEntriesNeeded + 1);
-            if (!TryFindFreeEntryRun(targetDir, lfnEntriesNeeded + 1, bpb, freeSlotOffsets) && targetDir.FirstCluster == 0)
-                throw new InvalidOperationException("No free directory entries available.");
+            // Create the destination entry first, reusing the source's cluster chain so no file data is copied and no
+            // clusters are reallocated. Creation is transactional and chain-aware: it grows the target directory as
+            // needed and, on any failure, rolls back its own directory bytes and appended clusters. Until this returns
+            // successfully the source entry is untouched, so a move that cannot complete never loses the file.
+            CreateDirectoryEntry(targetDir, fileName, fileSize, firstCluster, false, bpb);
 
-            // Create the destination entry first while it still reuses the source's cluster chain, so no file data
-            // is copied and no clusters are reallocated. The source stays fully intact until this succeeds.
-            try
-            {
-                CreateDirectoryEntry(targetDir, fileName, fileSize, firstCluster, false, bpb);
-            }
-            catch
-            {
-                // Neutralise every slot the destination scan had reserved so a partially written entry cannot
-                // survive as a stray file. The source entry has not been touched yet.
-                foreach (var offset in freeSlotOffsets)
-                    _imageData[offset] = 0xE5;
-
-                throw;
-            }
-
-            // The destination entry exists now, so only the source's directory entries have to go. The cluster
-            // chain is deliberately NOT freed here: it belongs to the destination entry.
+            // The destination entry now exists and is discoverable, so only the source's directory entries have to go.
+            // The cluster chain is deliberately NOT freed here: it belongs to the destination entry.
             foreach (var lfnOffset in GetLfNEntryOffsets(sourceDir, sourceEntryOffset, bpb))
                 _imageData[lfnOffset] = 0xE5;
 
@@ -2544,7 +2646,7 @@ namespace NetImage.Workers
                     if (newLfnCount > 0)
                     {
                         // Update LFN entries and short name
-                        var shortNameBytes = System.Text.Encoding.ASCII.GetBytes(newShortName);
+                        var shortNameBytes = EncodeShortNameBytes(newShortName);
                         WriteLfNEntries(lfnOffsets, newName, shortNameBytes, newLfnCount);
 
                         // Update short name entry
@@ -2569,7 +2671,7 @@ namespace NetImage.Workers
                         // Update short name entry
                         var entryBuffer = new byte[32];
                         entry.CopyTo(entryBuffer);
-                        var shortNameBytes = System.Text.Encoding.ASCII.GetBytes(newShortName);
+                        var shortNameBytes = EncodeShortNameBytes(newShortName);
                         for (int i = 0; i < shortNameBytes.Length; i++)
                         {
                             entryBuffer[i] = shortNameBytes[i];
@@ -2781,7 +2883,10 @@ namespace NetImage.Workers
         }
 
         /// <summary>
-        /// Creates a new blank FAT16 hard disk image with MBR partition table.
+        /// Creates a new blank FAT16 (or, for small geometries, FAT12) hard disk image with an MBR partition table.
+        /// The filesystem type is derived from the resulting cluster count so sizing, reserved-entry initialization,
+        /// the MBR partition type and the reported <see cref="FilesystemType"/> all agree, and reopening classifies
+        /// the same image with the identical type.
         /// </summary>
         /// <param name="cylinders">Number of cylinders (1-16383).</param>
         /// <param name="heads">Number of heads per cylinder (1-255).</param>
@@ -2799,7 +2904,7 @@ namespace NetImage.Workers
             if (!string.IsNullOrEmpty(volumeLabel) && volumeLabel.Length > 11)
                 volumeLabel = volumeLabel.Substring(0, 11);
 
-            uint bytesPerSector = 512;
+            const uint bytesPerSector = 512;
             long imageSize = (long)cylinders * heads * sectorsPerTrack * bytesPerSector;
             _imageData = new byte[imageSize];
             _partitionStartSector = 63; // Standard: first partition starts at sector 63
@@ -2807,17 +2912,52 @@ namespace NetImage.Workers
             uint totalSectors = cylinders * heads * sectorsPerTrack;
             uint partitionSectors = totalSectors - _partitionStartSector;
 
-            CreateMbr(_imageData.AsSpan(0, 512), cylinders, heads, sectorsPerTrack);
-            var bpb = CreateFat16BootSector(_imageData.AsSpan((int)(_partitionStartSector * bytesPerSector), 512), partitionSectors, heads, sectorsPerTrack);
-            InitializeFat16(bpb, _partitionStartSector, volumeLabel);
+            // Derive the geometry exactly as the boot sector will describe it, then classify the filesystem from the
+            // data-cluster count using the same thresholds <see cref="GetFatType"/> applies when the image is reopened.
+            byte sectorsPerCluster = GetSectorsPerClusterForFat16(partitionSectors);
+            uint reservedSectors = 32;
+            byte numFats = 2;
+            uint rootDirEntries = 512;
+            uint sectorsPerFat = CalculateFat16Sectors(partitionSectors, sectorsPerCluster, reservedSectors, numFats, rootDirEntries);
+
+            var fatType = ClassifyHardDisk(partitionSectors, sectorsPerCluster, reservedSectors, numFats, rootDirEntries, sectorsPerFat);
+            if (fatType == FatType.Fat32)
+                throw new ArgumentException("The requested geometry yields too many clusters for the supported FAT12/FAT16 formats.");
+
+            CreateMbr(_imageData.AsSpan(0, 512), cylinders, heads, sectorsPerTrack, GetPartitionType(fatType, totalSectors));
+            var bpb = CreateHardDiskBootSector(_imageData.AsSpan((int)(_partitionStartSector * bytesPerSector), 512), partitionSectors, heads, sectorsPerTrack);
+            InitializeHardDiskFileTables(bpb, _partitionStartSector, fatType, volumeLabel);
 
             _isLoaded = true;
-            _fatType = FatType.Fat16;
+            _fatType = fatType;
             VolumeLabel = volumeLabel;
             FilesAndFolders.Clear();
         }
 
-        private void CreateMbr(Span<byte> mbr, uint cylinders, uint heads, uint sectorsPerTrack)
+        /// <summary>
+        /// Computes the data-cluster count for a hard-disk geometry using the identical arithmetic to
+        /// <see cref="ParseBpb"/>, then classifies it with <see cref="GetFatType"/> so creation and reopening agree.
+        /// </summary>
+        private FatType ClassifyHardDisk(uint partitionSectors, byte sectorsPerCluster, uint reservedSectors, byte numFats, uint rootDirEntries, uint sectorsPerFat)
+        {
+            uint rootDirSectors = ((rootDirEntries * 32) + (512 - 1)) / 512;
+            uint dataAreaStart = reservedSectors + ((uint)numFats * sectorsPerFat) + rootDirSectors;
+            uint dataSectors = partitionSectors > dataAreaStart ? partitionSectors - dataAreaStart : 0;
+            uint clusterCount = sectorsPerCluster == 0 ? 0 : dataSectors / sectorsPerCluster;
+
+            return GetFatType(new Bpb { ClusterCount = clusterCount });
+        }
+
+        /// <summary>
+        /// Returns the MBR partition type byte matching the filesystem that will actually be written.
+        /// </summary>
+        private static byte GetPartitionType(FatType fatType, uint totalSectors) => fatType switch
+        {
+            FatType.Fat12 => 0x01,
+            _ => totalSectors > 65536 ? (byte)0x0E : (byte)0x06,
+        };
+
+        private void CreateMbr(Span<byte> mbr, uint cylinders, uint heads, uint sectorsPerTrack, byte partitionType)
         {
             // MBR boot code (446 bytes) - simple NOPs with a message
             for (int i = 0; i < 3; i++) mbr[i] = 0xEB; // JMP instruction
@@ -2835,9 +2975,8 @@ namespace NetImage.Workers
             partitionEntry[2] = 0x01; // Sector (high 2 bits of cyl | sector)
             partitionEntry[3] = 0x00; // Cylinder
 
-            // Partition type: 0x0E = FAT16 (>32MB, LBA), 0x06 for <32MB
-            uint totalSectors = cylinders * heads * sectorsPerTrack;
-            partitionEntry[4] = totalSectors > 65536 ? (byte)0x0E : (byte)0x06;
+            // Partition type supplied by the caller so it always matches the filesystem actually written.
+            partitionEntry[4] = partitionType;
 
             // CHS end location
             byte endHead = (byte)(heads - 1);
@@ -2855,7 +2994,7 @@ namespace NetImage.Workers
             partitionEntry[11] = (byte)((startLba >> 24) & 0xFF);
 
             // Partition size in sectors (little-endian, 4 bytes)
-            uint sectorCount = totalSectors - startLba;
+            uint sectorCount = cylinders * heads * sectorsPerTrack - startLba;
             partitionEntry[12] = (byte)(sectorCount & 0xFF);
             partitionEntry[13] = (byte)((sectorCount >> 8) & 0xFF);
             partitionEntry[14] = (byte)((sectorCount >> 16) & 0xFF);
@@ -2866,9 +3005,9 @@ namespace NetImage.Workers
             mbr[511] = 0xAA;
         }
 
-        private Bpb CreateFat16BootSector(Span<byte> bootSector, uint partitionSectors, uint heads, uint sectorsPerTrack)
+        private Bpb CreateHardDiskBootSector(Span<byte> bootSector, uint partitionSectors, uint heads, uint sectorsPerTrack)
         {
-            // Calculate FAT16 parameters
+            // Calculate FAT parameters (the BPB layout is identical for FAT12 and FAT16 hard disks)
             byte sectorsPerCluster = GetSectorsPerClusterForFat16(partitionSectors);
             uint reservedSectors = 32; // Standard for FAT16 hard disks
             byte numFats = 2;
@@ -3021,32 +3160,28 @@ namespace NetImage.Workers
             return 1;
         }
 
-        private void InitializeFat16(Bpb bpb, uint partitionStart, string volumeLabel)
+        private void InitializeHardDiskFileTables(Bpb bpb, uint partitionStart, FatType fatType, string volumeLabel)
         {
             var imageData = _imageData!;
             uint bytesPerSector = bpb.BytesPerSector;
-            byte sectorsPerCluster = bpb.SectorsPerCluster;
-            uint reservedSectors = bpb.ReservedSectors;
             byte numFats = bpb.NumFats;
-            uint rootDirEntries = bpb.RootDirEntries;
             uint sectorsPerFat = bpb.SectorsPerFat16;
+            const byte mediaDescriptor = 0xF8; // fixed hard-disk media byte written by CreateHardDiskBootSector
 
-            // Calculate cluster count for FAT size
-            uint rootDirSectors = ((rootDirEntries * 32) + (bytesPerSector - 1)) / bytesPerSector;
-            uint dataStartSector = partitionStart + reservedSectors + (numFats * sectorsPerFat) + rootDirSectors;
-
-            // Initialize FATs
+            // Initialize every FAT copy's reserved entries for the filesystem type that was actually chosen.
             for (byte fatNum = 0; fatNum < numFats; fatNum++)
             {
-                uint fatStartSector = partitionStart + reservedSectors + (fatNum * sectorsPerFat);
-                uint fatOffset = fatStartSector * bytesPerSector;
+                uint fatStartSector = partitionStart + bpb.ReservedSectors + (fatNum * sectorsPerFat);
+                int fatOffset = (int)(fatStartSector * bytesPerSector);
 
-                // Reserved FAT16 entries (clusters 0 and 1); data cluster 2 stays free.
-                WriteReservedFat16Entries((int)fatOffset, 0xF8);
+                if (fatType == FatType.Fat12)
+                    WriteReservedFat12Entries(fatOffset, mediaDescriptor);
+                else
+                    WriteReservedFat16Entries(fatOffset, mediaDescriptor);
             }
 
             // Initialize root directory with volume label
-            uint rootDirStartSector = partitionStart + reservedSectors + (numFats * sectorsPerFat);
+            uint rootDirStartSector = partitionStart + bpb.ReservedSectors + ((uint)numFats * sectorsPerFat);
             uint rootDirOffset = rootDirStartSector * bytesPerSector;
 
             if (!string.IsNullOrEmpty(volumeLabel))
@@ -3216,6 +3351,20 @@ namespace NetImage.Workers
             // entry[1] = 0xFFFF (reserved / end-of-chain)
             imageData[fatOffset + 2] = 0xFF;
             imageData[fatOffset + 3] = 0xFF;
+        }
+
+        /// <summary>
+        /// Writes the two reserved FAT12 entries at the start of a FAT copy: entry[0] carries the media descriptor and
+        /// entry[1] is an end-of-chain marker, packed as the three bytes [media, 0xFF, 0xFF]. The byte after them is left
+        /// zero so data cluster 2 (which occupies that following byte pair under FAT12's 1.5-byte packing) stays free.
+        /// </summary>
+        private void WriteReservedFat12Entries(int fatOffset, byte mediaDescriptor)
+        {
+            var imageData = _imageData!;
+
+            imageData[fatOffset] = mediaDescriptor;
+            imageData[fatOffset + 1] = 0xFF;
+            imageData[fatOffset + 2] = 0xFF;
         }
 
         private void InitializeRootDirectory(uint rootDirEntries, uint reservedSectors, byte numFats, uint sectorsPerFat, uint bytesPerSector, string volumeLabel)
